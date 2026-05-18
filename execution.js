@@ -218,12 +218,14 @@ export async function getSwapQuote({ fromMint, toMint, amount }) {
   const toDecimals = parseInt(q?.toToken?.decimal || '0', 10);
   const toAmountRaw = parseFloat(q?.toTokenAmount || 0);
   const to_amount = toDecimals > 0 ? toAmountRaw / Math.pow(10, toDecimals) : toAmountRaw;
+  const unit_price = parseFloat(q?.toToken?.tokenUnitPrice || 0) || null;
 
   return {
     to_amount,
     price_impact_pct: parseFloat(q?.priceImpactPercent || 0),
     estimated_slippage_pct: parseFloat(q?.priceImpactPercent || 0),
     quote_id: q?.contextSlot,
+    to_token_unit_price_usd: unit_price,  // entry price for the to-token
   };
 }
 
@@ -243,6 +245,7 @@ export async function executeSwap({ fromMint, toMint, amount, clientOrderId, max
     return {
       tx_id: `dry-${clientOrderId}`,
       filled_amount: quote.to_amount,
+      to_token_unit_price_usd: quote.to_token_unit_price_usd,
       dry_run: true,
     };
   }
@@ -269,6 +272,7 @@ export async function executeSwap({ fromMint, toMint, amount, clientOrderId, max
     return {
       tx_id: txHash || clientOrderId,
       filled_amount: filled,
+      to_token_unit_price_usd: parseFloat(data?.toToken?.tokenUnitPrice || 0) || quote.to_token_unit_price_usd,
       dry_run: false,
     };
   } catch (err) {

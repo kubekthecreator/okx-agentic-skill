@@ -19,6 +19,16 @@ const SCALE_OUT_LEVELS = [
 const TIME_STOP_MS = 5 * 24 * 60 * 60 * 1000;  // 5 days
 const VOLUME_COLLAPSE_PCT = 70;
 const VETO_THRESHOLD_FRACTION = 0.15;  // positions > 15% of portfolio need veto
+const EXIT_PENDING_STALE_MS = 10 * 60 * 1000;  // 10 min: stuck exit_pending → clear
+
+async function fetchCandlesWithRetry(mint, n, attempts = 3, delayMs = 500) {
+  for (let i = 0; i < attempts; i++) {
+    const candles = await execution.fetchCandles(mint, n);
+    if (candles.length > 0) return candles;
+    if (i < attempts - 1) await new Promise(r => setTimeout(r, delayMs));
+  }
+  return [];
+}
 
 // ─── New entries ───────────────────────────────────────────────────────────
 
@@ -116,8 +126,27 @@ async function openPosition({ token, baseToken, size_usd, signals: ev }) {
     return;
   }
 
-  const candles = await execution.fetchCandles(token.mint, 1);
-  const entry_price_usd = candles.length > 0 ? candles[candles.length - 1].close : null;
+  // Resolve entry price. Prefer quote-derived unit price (already paid for),
+  // fall back to candle fetch with retry. If both fail, the position would
+  // be untrackable (NaN pnl_pct disables all exit logic) — abort and alert.
+  const candles = await fetchCandlesWithRetry(token.mint, 1, 3);
+  const candle_price = candles.length > 0 ? candles[candles.length - 1].close : null;
+  const entry_price_usd = fill.to_token_unit_price_usd ?? candle_price;
+
+  if (!entry_price_usd || !Number.isFinite(entry_price_usd)) {
+    logger.error('entry_price_unavailable', {
+      token: token.symbol,
+      tx: fill.tx_id,
+      dry_run: fill.dry_run,
+    });
+    await alert(
+      `⚠️ *BUY ${token.symbol}* swap fired but entry price unavailable.\n` +
+      `TX: \`${fill.tx_id}\`\n` +
+      `Position NOT tracked — manual reconciliation required (close via CLI or wait for next entry to re-evaluate).`
+    );
+    return;
+  }
+
   const entry_amount_token = fill.filled_amount;
 
   const position = state.openPosition({
@@ -190,6 +219,19 @@ export async function manageOpenPositions({ baseToken }) {
 }
 
 async function managePosition(pos, baseToken) {
+  // Skip if an exit is already in flight. Auto-clear if stale (>10min) so a
+  // crashed bot mid-exit doesn't leave the position permanently stuck.
+  if (pos.exit_pending) {
+    const ageMs = Date.now() - new Date(pos.exit_pending.started_ts).getTime();
+    if (ageMs < EXIT_PENDING_STALE_MS) {
+      logger.debug('skip_exit_pending', { position_id: pos.id, ageMs });
+      return;
+    }
+    logger.warn('exit_pending_stale_cleared', { position_id: pos.id, ageMs });
+    state.updatePosition(pos.id, { exit_pending: null });
+    pos.exit_pending = null;
+  }
+
   const candles = await execution.fetchCandles(pos.token.mint, 6);
   if (candles.length === 0) return;
   const current_price = signals.lastPrice(candles);
@@ -289,6 +331,12 @@ async function closeAll(pos, baseToken, current_price, reason) {
     return finalizeClose(pos, current_price, reason);
   }
 
+  // Mark exit_pending BEFORE the swap so a concurrent caller or restart
+  // can detect that an exit is already underway and not double-issue.
+  state.updatePosition(pos.id, {
+    exit_pending: { reason, started_ts: new Date().toISOString() },
+  });
+
   try {
     const fill = await execution.executeSwap({
       fromMint: pos.token.mint,
@@ -298,7 +346,12 @@ async function closeAll(pos, baseToken, current_price, reason) {
     });
     return finalizeClose(pos, current_price, reason, fill);
   } catch (err) {
-    logger.error('close_swap_failed', { position_id: pos.id, error: err.message });
+    logger.error('close_swap_failed', {
+      position_id: pos.id, token: pos.token.symbol, reason, error: err.message,
+    });
+    // Clear the flag so the next tick can retry. Without this, the stale-clear
+    // would only fire after EXIT_PENDING_STALE_MS, locking the position.
+    state.updatePosition(pos.id, { exit_pending: null });
   }
 }
 
