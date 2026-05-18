@@ -83,11 +83,18 @@ export const logger = {
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT = process.env.TELEGRAM_CHAT_ID;
 
+const TELEGRAM_TIMEOUT_MS = 5_000;
+
 export async function alert(message, opts = {}) {
   // Always log
   logger.info('alert', { message, ...opts });
 
   if (!TG_TOKEN || !TG_CHAT) return;
+
+  // Bound the fetch so a stalled Telegram API (or DNS) can never block a
+  // tick. Strategy decisions don't depend on alert delivery succeeding.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TELEGRAM_TIMEOUT_MS);
 
   try {
     const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
@@ -101,12 +108,19 @@ export async function alert(message, opts = {}) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
     if (!res.ok) {
       logger.warn('telegram_send_failed', { status: res.status });
     }
   } catch (err) {
-    logger.warn('telegram_error', { error: err.message });
+    if (err.name === 'AbortError') {
+      logger.warn('telegram_timeout', { timeout_ms: TELEGRAM_TIMEOUT_MS });
+    } else {
+      logger.warn('telegram_error', { error: err.message });
+    }
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
