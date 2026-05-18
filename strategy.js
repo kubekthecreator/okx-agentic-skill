@@ -8,7 +8,7 @@ import { randomUUID } from 'crypto';
 import { logger, alert, alertWithVeto } from './logger.js';
 import signals from './signals.js';
 import risk from './risk.js';
-import execution from './execution.js';
+import execution, { CliConfirmingError } from './execution.js';
 import state from './state.js';
 
 const SCALE_OUT_LEVELS = [
@@ -122,6 +122,16 @@ async function openPosition({ token, baseToken, size_usd, signals: ev }) {
       clientOrderId,
     });
   } catch (err) {
+    if (err instanceof CliConfirmingError) {
+      await alert(
+        `🟡 *BUY ${token.symbol} BLOCKED — confirmation required*\n` +
+        `${err.message}\n` +
+        `Next step (CLI): \`${err.next || 'see CLI output'}\`\n` +
+        `Bot will NOT auto-force. Run manually if intended.`
+      );
+      logger.warn('entry_swap_confirming', { token: token.symbol, message: err.message });
+      return;
+    }
     logger.error('entry_swap_failed', { token: token.symbol, error: err.message });
     return;
   }
@@ -346,6 +356,22 @@ async function closeAll(pos, baseToken, current_price, reason) {
     });
     return finalizeClose(pos, current_price, reason, fill);
   } catch (err) {
+    if (err instanceof CliConfirmingError) {
+      // Position stays open with exit_pending set. Stale-clear will reset
+      // after 10min so a real exit attempt can happen on a later tick after
+      // the user (or CLI policy) clears the confirming gate.
+      await alert(
+        `🔴 *EXIT ${pos.token.symbol} BLOCKED — confirmation required*\n` +
+        `Reason: \`${reason}\`\n` +
+        `${err.message}\n` +
+        `Next step (CLI): \`${err.next || 'see CLI output'}\`\n` +
+        `Position held; exit will retry after manual confirmation.`
+      );
+      logger.warn('close_swap_confirming', {
+        position_id: pos.id, token: pos.token.symbol, reason, message: err.message,
+      });
+      return;
+    }
     logger.error('close_swap_failed', {
       position_id: pos.id, token: pos.token.symbol, reason, error: err.message,
     });

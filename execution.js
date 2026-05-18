@@ -23,6 +23,17 @@ const HOLDERS_FILE = path.join(process.cwd(), 'holders_history.json');
 
 // ─── CLI shell-out ─────────────────────────────────────────────────────────
 
+// Custom error class so callers can distinguish a confirming-required
+// response (the CLI demanding human approval) from a hard CLI error.
+export class CliConfirmingError extends Error {
+  constructor(message, next) {
+    super(message);
+    this.name = 'CliConfirmingError';
+    this.confirming = true;
+    this.next = next;
+  }
+}
+
 async function cli(args, { timeout = 30_000 } = {}) {
   try {
     const { stdout } = await execFileP(CLI, args, {
@@ -31,19 +42,29 @@ async function cli(args, { timeout = 30_000 } = {}) {
       windowsHide: true,
     });
     const parsed = JSON.parse(stdout);
+    // Exit code 0 + confirming flag = CLI wants human approval. Never auto-force.
+    if (parsed.confirming) {
+      throw new CliConfirmingError(parsed.message || 'confirming_required', parsed.next);
+    }
     if (parsed.ok === false) {
       throw new Error(parsed.msg || `cli_not_ok:${parsed.code}`);
     }
     return parsed.data;
   } catch (err) {
+    if (err instanceof CliConfirmingError) throw err;
     // CLI returns non-zero on errors but still prints JSON to stdout
     if (err.stdout) {
       try {
         const j = JSON.parse(err.stdout);
+        // Exit code 2 + confirming:true is the documented CLI confirming path.
+        if (j.confirming) {
+          throw new CliConfirmingError(j.message || 'confirming_required', j.next);
+        }
         const msg = j.msg || j.message || `cli_code_${j.code}`;
         logger.warn('cli_error_response', { cmd: args.slice(0, 2).join(' '), code: j.code, msg });
         throw new Error(msg);
       } catch (parseErr) {
+        if (parseErr instanceof CliConfirmingError) throw parseErr;
         // fall through
       }
     }
@@ -276,6 +297,15 @@ export async function executeSwap({ fromMint, toMint, amount, clientOrderId, max
       dry_run: false,
     };
   } catch (err) {
+    // Confirming response = CLI wants a human in the loop. Never auto-force;
+    // bubble up with a distinct tag so the caller can surface to Telegram and
+    // mark the position as pending manual review.
+    if (err instanceof CliConfirmingError) {
+      logger.warn('swap_confirming_required', {
+        clientOrderId, message: err.message, next: err.next,
+      });
+      throw err;
+    }
     logger.error('swap_execution_failed', { error: err.message, clientOrderId });
     throw err;
   }
