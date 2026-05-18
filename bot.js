@@ -186,8 +186,24 @@ async function main() {
   printBanner();
   state.loadState();
 
-  // Initialize starting portfolio for daily PnL accounting
-  const startingPortfolio = await execution.getPortfolioValueUsd();
+  // Initialize starting portfolio for daily PnL accounting.
+  // Hard-fail on persistent balance errors — without a real number here, all
+  // daily PnL guards in risk.js divide by zero and silently disable themselves.
+  let startingPortfolio;
+  try {
+    startingPortfolio = await execution.getPortfolioValueUsd();
+  } catch (err) {
+    logger.warn('startup_balance_failed_retrying', { error: err.message });
+    await new Promise(r => setTimeout(r, 5000));
+    try {
+      startingPortfolio = await execution.getPortfolioValueUsd();
+    } catch (err2) {
+      logger.error('startup_balance_failed', { error: err2.message });
+      console.error(`\n❌ Could not read wallet balance twice in a row.\nRun \`onchainos wallet balance --chain solana\` manually to debug.\n${err2.message}\n`);
+      process.exit(1);
+    }
+  }
+
   const s = state.loadState();
   if (s.daily.starting_portfolio_usd === 0) {
     s.daily.starting_portfolio_usd = startingPortfolio;

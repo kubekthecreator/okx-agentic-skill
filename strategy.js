@@ -359,7 +359,16 @@ async function finalizeClose(pos, current_price, reason, fill = null) {
   const realized_pnl_pct = ((current_price - pos.entry_price_usd) / pos.entry_price_usd) * 100;
   const realized_pnl_usd = pos.entry_value_usd * (realized_pnl_pct / 100);
 
-  const portfolio_usd = await execution.getPortfolioValueUsd();
+  // The close itself must always finalize even if the post-close balance
+  // read blips. Post-win cooldown is just a derived behavior; losing it for
+  // one trade is acceptable, losing the close record is not.
+  let portfolio_usd = 0;
+  try {
+    portfolio_usd = await execution.getPortfolioValueUsd();
+  } catch (err) {
+    logger.warn('post_close_balance_failed', { position_id: pos.id, error: err.message });
+  }
+
   const trade = state.closePosition(pos.id, {
     exit_ts: new Date().toISOString(),
     exit_price_usd: current_price,

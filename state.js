@@ -86,7 +86,18 @@ export function loadState() {
       logger.info('state_initialized');
     }
   } catch (err) {
-    logger.error('state_load_failed', { error: err.message });
+    // Preserve the bad file as evidence before falling back to defaults.
+    // Without this, the next saveState() would overwrite the only record of
+    // open positions / history.
+    const backup = `${STATE_FILE}.corrupted-${Date.now()}`;
+    try {
+      fs.copyFileSync(STATE_FILE, backup);
+      logger.error('state_load_failed_backup_saved', { error: err.message, backup });
+    } catch (copyErr) {
+      logger.error('state_load_failed_backup_failed', {
+        error: err.message, backup_error: copyErr.message,
+      });
+    }
     cache = DEFAULT_STATE();
   }
   return cache;

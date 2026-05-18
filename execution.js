@@ -171,20 +171,20 @@ function writeHoldersHistory(h) {
 
 // ─── Balance ───────────────────────────────────────────────────────────────
 
+// fetchBalances throws on CLI error. Callers MUST handle, because silently
+// returning [] (= portfolio_usd 0) makes every daily-PnL guard in risk.js
+// divide by zero and quietly disable itself — the bot would keep trading
+// with no governance. The tick try/catch in bot.js handles transient
+// failures; startup-time callers should hard-fail.
 export async function fetchBalances() {
-  try {
-    const data = await cli(['wallet', 'balance', '--chain', CHAIN]);
-    const assets = (data?.details || []).flatMap(d => d.tokenAssets || []);
-    return assets.map(a => ({
-      symbol: a.symbol,
-      mint: a.tokenAddress || '',
-      balance: parseFloat(a.balance || 0),
-      value_usd: parseFloat(a.usdValue || 0),
-    }));
-  } catch (err) {
-    logger.error('fetch_balances_failed', { error: err.message });
-    return [];
-  }
+  const data = await cli(['wallet', 'balance', '--chain', CHAIN]);
+  const assets = (data?.details || []).flatMap(d => d.tokenAssets || []);
+  return assets.map(a => ({
+    symbol: a.symbol,
+    mint: a.tokenAddress || '',
+    balance: parseFloat(a.balance || 0),
+    value_usd: parseFloat(a.usdValue || 0),
+  }));
 }
 
 export async function getPortfolioValueUsd() {
