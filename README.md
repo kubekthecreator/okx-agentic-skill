@@ -156,14 +156,24 @@ mode: overtrading after a win.
 
 ## Execution reliability
 
-**Idempotent operations.** Every trade carries a client-generated UUID.
-Retries on network failure reference the same ID, so a flaky connection
-cannot double-execute.
+**Concurrency safety.** The main 60-second tick and the 5-minute kill-check
+loop both call `manageOpenPositions`. Two guards prevent duplicate execution:
+1. A per-position in-process mutex — whichever loop grabs the lock runs;
+   the other skips that position until next round.
+2. Loops self-reschedule via `setTimeout` after the previous run finishes,
+   not `setInterval`, so a slow tick can never overlap itself.
+
+**Exit-in-flight marker.** Before issuing an exit swap, the bot writes
+`exit_pending: { reason, started_ts }` into the position's state. A
+concurrent caller (or a restart) sees the flag and skips. Stale flags
+older than 10 minutes are auto-cleared so a crash mid-exit doesn't leave
+the position permanently stuck.
 
 **State persistence.** All open positions, kill conditions, and PnL history
-live in `state.json` and are flushed after every state change. Process
-restart loses no information. Tested by killing the bot mid-trade and
-restarting — open positions resume monitoring without manual intervention.
+live in `state.json` and are flushed (atomic temp+rename) after every state
+change. On a JSON parse error the corrupted file is preserved as
+`state.json.corrupted-<ts>` before falling back to defaults — the user can
+inspect or recover. Process restart loses no information.
 
 **Pre-flight checks** before every swap:
 - Sufficient SOL gas balance (min 0.003 SOL)
@@ -173,10 +183,23 @@ restarting — open positions resume monitoring without manual intervention.
 - Daily limit not breached
 
 If any check fails, the trade is logged with rejection reason and skipped.
-No silent failures.
 
-**Rate limiting.** The bot respects OKX API limits with a token-bucket
-backoff. A 429 response is logged but never crashes the loop.
+**Confirming responses are surfaced, not auto-forced.** When the OnchainOS
+CLI returns a confirming response (its backend wants a human in the loop),
+the bot does NOT pass `--force`. It alerts to Telegram with the CLI's
+next-step hint and leaves the position state correct (no entry on a
+blocked buy; `exit_pending` retained on a blocked exit until the operator
+acts).
+
+**Entry price always validated.** Entry price is derived from the swap
+quote response (`toToken.tokenUnitPrice`), with a 3×500ms candle fetch as
+fallback. If both fail, the position is never created with a null price
+(which would NaN-out the PnL math and disable every exit guard).
+
+**Balance failures fail loud.** A failed `fetchBalances` at startup
+retries once after 5s and then `process.exit(1)`. In-tick failures skip
+that one tick and retry the next. The bot never trades with a silently
+zeroed portfolio (which would disable all daily PnL guards).
 
 **Dry run mode.** `DRY_RUN=true` simulates all swaps with current market
 quotes. State updates happen normally, but no chain transactions are
@@ -187,33 +210,28 @@ broadcast. Use this for at least 24 hours before going live.
 The bot does not pretend to be safe. Trading is risky and this skill makes
 that visible at every step.
 
-**Before first run, the bot displays:**
-```
-⚠️ This skill executes real on-chain trades.
-⚠️ Trading can result in total loss of deployed capital.
-⚠️ This is not financial advice.
-⚠️ You are participating in a competition with explicit rules — read them.
-
-Continue? Type CONFIRM to proceed.
-```
+**Startup banner.** On launch the bot prints a banner declaring mode
+(LIVE / DRY RUN), tick interval, and whitelist size — see [bot.js](bot.js)
+`printBanner()`. There is no interactive CONFIRM prompt; the gate is
+`DRY_RUN=true` in `.env` (the default).
 
 **Capital caps.** `MAX_PORTFOLIO_USD` in `.env` is a hard ceiling — bot will
 never deploy more than this even if wallet balance is higher. Default $200.
 
 **Material decisions ping a human.** Any position > 15% of portfolio
-dispatches a Telegram alert with a 2-minute veto window before execution.
-Replying STOP cancels the trade. Silence → proceed (this is intentional,
-so the bot doesn't stall when you're asleep).
+dispatches a Telegram alert before execution. *Note:* full veto polling
+(reply STOP to cancel) is a roadmap item — current v0.1 alerts and
+proceeds; the alert is for visibility, not interactive approval. See
+`alertWithVeto` in [logger.js](logger.js).
 
-**Emergency controls.**
-- `STOP` to Telegram bot → halt all new positions
-- `EXIT` to Telegram bot → close all positions at market
-- Pressing Ctrl-C → graceful shutdown, state flushed, positions left open
+**Confirming gates surface to Telegram.** When the OKX OnchainOS CLI's
+backend requires explicit human approval for a swap (e.g. risk-warning
+81362), the bot does not auto-`--force` it. An alert is dispatched with
+the CLI's next-step hint; the operator decides.
 
-**Wallet export detection.** If the bot detects an export attempt on the
-agentic wallet (which would disqualify the participant from the competition
-and give the agent unencrypted keys), it immediately halts and dispatches
-an alert.
+**Graceful shutdown.** SIGINT / SIGTERM → state.json flushed atomically,
+final shutdown alert dispatched, open positions left intact for the next
+start to resume monitoring.
 
 **No data exfiltration.** The bot does not transmit your trades anywhere
 except OKX itself and your Telegram bot. No analytics, no telemetry.
