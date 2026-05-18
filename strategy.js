@@ -164,15 +164,27 @@ function buildKillConditions(ev, candles) {
 
 // ─── Position management ───────────────────────────────────────────────────
 
+// Per-position mutex shared by main tick + killCheckLoop. Either can call
+// manageOpenPositions; whichever grabs the lock first runs, the other skips
+// that position until next round. Prevents double-close / double-scale-out.
+const _positionLocks = new Set();
+
 export async function manageOpenPositions({ baseToken }) {
   const positions = state.getOpenPositions();
   for (const pos of positions) {
+    if (_positionLocks.has(pos.id)) {
+      logger.debug('skip_locked_position', { position_id: pos.id });
+      continue;
+    }
+    _positionLocks.add(pos.id);
     try {
       await managePosition(pos, baseToken);
     } catch (err) {
       logger.error('manage_position_failed', {
         position_id: pos.id, token: pos.token.symbol, error: err.message,
       });
+    } finally {
+      _positionLocks.delete(pos.id);
     }
   }
 }

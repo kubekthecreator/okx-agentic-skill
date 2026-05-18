@@ -115,15 +115,30 @@ async function tick() {
 }
 
 // ─── Background monitoring loops ───────────────────────────────────────────
+//
+// Both loops self-reschedule via setTimeout AFTER the previous run finishes,
+// so a slow tick can never overlap itself. Concurrency between the two loops
+// is bounded by the per-position mutex inside strategy.manageOpenPositions.
 
 async function killCheckLoop() {
   if (isShuttingDown) return;
   try {
-    // Re-check kill conditions on all open positions, frequently
     await strategy.manageOpenPositions({ baseToken: TOKENS.base_token });
   } catch (err) {
     logger.error('kill_check_failed', { error: err.message });
   }
+}
+
+async function tickRunner() {
+  if (isShuttingDown) return;
+  await tick();
+  if (!isShuttingDown) setTimeout(tickRunner, TICK_INTERVAL_MS);
+}
+
+async function killCheckRunner() {
+  if (isShuttingDown) return;
+  await killCheckLoop();
+  if (!isShuttingDown) setTimeout(killCheckRunner, KILL_CHECK_INTERVAL_MS);
 }
 
 async function dailySummary() {
@@ -181,13 +196,10 @@ async function main() {
 
   await alert(`🚀 Bot started\nMode: ${process.env.DRY_RUN === 'false' ? 'LIVE' : 'DRY RUN'}\nPortfolio: $${startingPortfolio.toFixed(2)}`);
 
-  // First tick immediately
-  await tick();
-
-  // Schedule loops
-  setInterval(tick, TICK_INTERVAL_MS);
-  setInterval(killCheckLoop, KILL_CHECK_INTERVAL_MS);
-  setInterval(checkDailySummary, 60_000);  // check every minute, fires once per day
+  // Self-rescheduling loops — no setInterval, no overlap.
+  tickRunner();
+  setTimeout(killCheckRunner, KILL_CHECK_INTERVAL_MS);
+  setInterval(checkDailySummary, 60_000);  // pure clock check, no IO; safe
 }
 
 main().catch(err => {
