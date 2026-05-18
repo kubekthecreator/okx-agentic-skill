@@ -1,0 +1,62 @@
+# Run the bot under docker-compose.
+#
+# From the REPO ROOT:
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#   docker compose -f deploy/docker-compose.yml logs -f
+#   docker compose -f deploy/docker-compose.yml down
+#
+# Two host bind mounts make the container work:
+#   1. /usr/local/bin/onchainos  → the OnchainOS CLI binary (read-only)
+#   2. ~/.onchainos              → CLI auth state (api key, session, etc.)
+#                                  Must be ALREADY logged-in on the host:
+#                                  `onchainos wallet status` → loggedIn:true
+#
+# State is mounted from ./data (relative to compose file dir) so it
+# survives `docker compose down` and image rebuilds.
+
+services:
+  okx-bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: okx-bot:latest
+    container_name: okx-bot
+    restart: unless-stopped
+
+    # All bot settings come from .env at repo root. NEVER commit .env.
+    env_file:
+      - ../.env
+
+    volumes:
+      # Bot persistence — survives container restarts and rebuilds.
+      - ./data/state.json:/app/state.json
+      - ./data/holders_history.json:/app/holders_history.json
+      - ./data/logs:/app/logs
+
+      # onchainos CLI binary, read-only. Verify the host path with
+      # `command -v onchainos` and adjust if different.
+      - /usr/local/bin/onchainos:/usr/local/bin/onchainos:ro
+
+      # CLI auth state. The bot user inside the container reads from
+      # /home/okxbot/.onchainos, which we map to the host operator's
+      # actual CLI config.
+      - ${HOME}/.onchainos:/home/okxbot/.onchainos:ro
+
+    # Stay on the host network so DNS / IPv6 / outbound to OKX behave
+    # identically to a bare-metal install. Drop this if you prefer the
+    # default bridge.
+    # network_mode: host
+
+    # Per-container resource caps to match the systemd unit.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+    # journald-style log driver; tail with `docker compose logs -f`.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

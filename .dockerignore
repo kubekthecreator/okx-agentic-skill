@@ -1,0 +1,32 @@
+# Secrets — NEVER bake into image
+.env
+.env.*
+*.pem
+*.key
+
+# Runtime data — bind-mounted at runtime
+state.json
+state.json.tmp
+state.json.corrupted-*
+holders_history.json
+logs/
+*.log
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# VCS / IDE / agent
+.git/
+.gitignore
+.gitattributes
+.vscode/
+.idea/
+.claude/
+
+# Docs / dev artifacts not needed at runtime
+README.md
+SKILL.md
+deploy/README.md
+*.md

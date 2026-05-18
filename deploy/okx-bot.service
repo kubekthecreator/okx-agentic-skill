@@ -1,0 +1,58 @@
+[Unit]
+Description=OKX Agentic Wallet trend-follower bot
+Documentation=https://github.com/YOUR_USER/okx-agentic-skill
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Adjust these three to match your install
+User=okxbot
+WorkingDirectory=/opt/okx-bot
+EnvironmentFile=/opt/okx-bot/.env
+
+# The onchainos CLI must be on PATH for this user. If you installed it
+# under ~/.local/bin, prepend it explicitly here:
+# Environment=PATH=/home/okxbot/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+ExecStart=/usr/bin/node bot.js
+
+# Restart on any non-zero exit, but back off so a broken config doesn't
+# flap the unit every second.
+Restart=always
+RestartSec=10s
+
+# Give the bot time to flush state on SIGTERM (graceful shutdown handler
+# in bot.js writes state.json and dispatches a final Telegram alert).
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+
+# Logs → journald. Tail with: journalctl -u okx-bot -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=okx-bot
+
+# Sandboxing — narrow surface area for what is effectively a credentialed
+# trading process. Comment any line out if it conflicts with your setup.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/okx-bot
+# CLI credentials usually live in ~/.onchainos (read-only here is fine):
+ReadOnlyPaths=/home/okxbot/.onchainos
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# Resource caps — the bot is single-threaded and rarely allocates much.
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
