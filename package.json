@@ -1,0 +1,31 @@
+{
+  "name": "okx-agentic-skill",
+  "version": "0.1.0",
+  "description": "Trend-following trading skill for OKX Agentic Wallet Competition. AI-augmented, not AI-autonomous: enforces rules emotions break, exits on catalyst death, halts on losing streaks.",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "cross-env DRY_RUN=true node bot.js",
+    "test": "node --test test/",
+    "status": "node scripts/status.js"
+  },
+  "keywords": [
+    "okx",
+    "onchainos",
+    "trading",
+    "solana",
+    "agentic-wallet",
+    "trend-following"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0"
+  }
+}
