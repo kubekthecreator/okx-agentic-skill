@@ -481,7 +481,7 @@ is what the production strategy would have seen.
 ### Install
 
 ```bash
-git clone https://github.com/YOUR_USER/okx-agentic-skill
+git clone https://github.com/kubekthecreator/okx-agentic-skill
 cd okx-agentic-skill
 npm install
 cp .env.example .env

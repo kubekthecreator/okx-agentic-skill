@@ -1,6 +1,6 @@
 [Unit]
 Description=OKX Agentic Wallet trend-follower bot
-Documentation=https://github.com/YOUR_USER/okx-agentic-skill
+Documentation=https://github.com/kubekthecreator/okx-agentic-skill
 After=network-online.target
 Wants=network-online.target
 

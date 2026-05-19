@@ -68,7 +68,7 @@ sudo useradd --system --create-home --shell /usr/sbin/nologin okxbot
 sudo mkdir -p /opt/okx-bot
 sudo chown okxbot:okxbot /opt/okx-bot
 
-sudo -u okxbot git clone https://github.com/YOUR_USER/okx-agentic-skill /opt/okx-bot
+sudo -u okxbot git clone https://github.com/kubekthecreator/okx-agentic-skill /opt/okx-bot
 cd /opt/okx-bot
 sudo -u okxbot npm ci --omit=dev
 ```
@@ -128,7 +128,7 @@ Files: [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml).
 ### 1. Clone + configure
 
 ```bash
-git clone https://github.com/YOUR_USER/okx-agentic-skill
+git clone https://github.com/kubekthecreator/okx-agentic-skill
 cd okx-agentic-skill
 cp .env.example .env
 ${EDITOR:-nano} .env
