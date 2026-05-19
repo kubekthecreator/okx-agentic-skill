@@ -48,6 +48,7 @@ const DEFAULT_STATE = () => ({
   machine_state: 'Normal',
   halt_until: null,
   post_win_cooldown_until: null,
+  last_summary_date: null,  // anchored on first tick; daily summary fires on rollover
   positions: {},
   history: [],
   daily: newDailyStats(0),

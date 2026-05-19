@@ -34,43 +34,70 @@ export class CliConfirmingError extends Error {
   }
 }
 
-async function cli(args, { timeout = 30_000 } = {}) {
-  try {
-    const { stdout } = await execFileP(CLI, args, {
-      timeout,
-      maxBuffer: 10 * 1024 * 1024,
-      windowsHide: true,
-    });
-    const parsed = JSON.parse(stdout);
-    // Exit code 0 + confirming flag = CLI wants human approval. Never auto-force.
-    if (parsed.confirming) {
-      throw new CliConfirmingError(parsed.message || 'confirming_required', parsed.next);
-    }
-    if (parsed.ok === false) {
-      throw new Error(parsed.msg || `cli_not_ok:${parsed.code}`);
-    }
-    return parsed.data;
-  } catch (err) {
-    if (err instanceof CliConfirmingError) throw err;
-    // CLI returns non-zero on errors but still prints JSON to stdout
-    if (err.stdout) {
-      try {
-        const j = JSON.parse(err.stdout);
-        // Exit code 2 + confirming:true is the documented CLI confirming path.
-        if (j.confirming) {
-          throw new CliConfirmingError(j.message || 'confirming_required', j.next);
-        }
-        const msg = j.msg || j.message || `cli_code_${j.code}`;
-        logger.warn('cli_error_response', { cmd: args.slice(0, 2).join(' '), code: j.code, msg });
-        throw new Error(msg);
-      } catch (parseErr) {
-        if (parseErr instanceof CliConfirmingError) throw parseErr;
-        // fall through
+// Transient error codes worth retrying once. Stable backend errors (4xx-ish,
+// confirming, signal-rejected) are NOT retried — retrying a deterministic
+// "no" doesn't help and just doubles the latency.
+const TRANSIENT_NODE_CODES = new Set(['ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'ECONNREFUSED']);
+
+function isTransient(err) {
+  if (err instanceof CliConfirmingError) return false;
+  if (err.code && TRANSIENT_NODE_CODES.has(err.code)) return true;
+  // execFile timeout: err.killed=true, signal SIGTERM, code null
+  if (err.killed && err.signal === 'SIGTERM') return true;
+  return false;
+}
+
+async function cli(args, { timeout = 30_000, attempts = 2 } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const { stdout } = await execFileP(CLI, args, {
+        timeout,
+        maxBuffer: 10 * 1024 * 1024,
+        windowsHide: true,
+      });
+      const parsed = JSON.parse(stdout);
+      // Exit code 0 + confirming flag = CLI wants human approval. Never auto-force.
+      if (parsed.confirming) {
+        throw new CliConfirmingError(parsed.message || 'confirming_required', parsed.next);
       }
+      if (parsed.ok === false) {
+        throw new Error(parsed.msg || `cli_not_ok:${parsed.code}`);
+      }
+      return parsed.data;
+    } catch (err) {
+      if (err instanceof CliConfirmingError) throw err;
+      // CLI returns non-zero on errors but still prints JSON to stdout
+      if (err.stdout) {
+        try {
+          const j = JSON.parse(err.stdout);
+          // Exit code 2 + confirming:true is the documented CLI confirming path.
+          if (j.confirming) {
+            throw new CliConfirmingError(j.message || 'confirming_required', j.next);
+          }
+          const msg = j.msg || j.message || `cli_code_${j.code}`;
+          logger.warn('cli_error_response', { cmd: args.slice(0, 2).join(' '), code: j.code, msg, attempt });
+          throw new Error(msg);
+        } catch (parseErr) {
+          if (parseErr instanceof CliConfirmingError) throw parseErr;
+          // fall through to retry logic
+        }
+      }
+      lastErr = err;
+      if (isTransient(err) && attempt < attempts) {
+        logger.warn('cli_transient_retry', {
+          cmd: args.slice(0, 2).join(' '), code: err.code, attempt,
+        });
+        await new Promise(r => setTimeout(r, 500 * attempt));
+        continue;
+      }
+      logger.error('cli_call_failed', {
+        cmd: args.slice(0, 2).join(' '), error: err.message, attempt,
+      });
+      throw err;
     }
-    logger.error('cli_call_failed', { cmd: args.slice(0, 2).join(' '), error: err.message });
-    throw err;
   }
+  throw lastErr;
 }
 
 // ─── Market data ───────────────────────────────────────────────────────────

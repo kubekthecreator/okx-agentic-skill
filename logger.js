@@ -76,6 +76,15 @@ export const logger = {
   info: (msg, data) => log('info', msg, data),
   warn: (msg, data) => log('warn', msg, data),
   error: (msg, data) => log('error', msg, data),
+  // Best-effort sync flush. Called from shutdown handlers so the last few
+  // lines (including the shutdown sequence itself) hit disk before exit.
+  flush: () => {
+    try {
+      if (logStream && !logStream.destroyed) {
+        logStream.end();
+      }
+    } catch (_) { /* ignore */ }
+  },
 };
 
 // ─── Telegram ──────────────────────────────────────────────────────────────
@@ -124,14 +133,18 @@ export async function alert(message, opts = {}) {
   }
 }
 
-// Veto window: send alert and wait `timeoutMs` for a STOP reply.
-// Returns true if user vetoed, false otherwise.
-// NOTE: requires Telegram getUpdates polling — for v0.1 we just alert
-// and proceed (silence = proceed). Full veto loop is a roadmap item.
-export async function alertWithVeto(message, _timeoutMs = 120_000) {
-  await alert(`⏸️ ${message}\n\nReply STOP within 2 minutes to cancel.`);
-  // v0.1: no polling — proceed unconditionally after alert
-  // v0.2: poll getUpdates for STOP, return true if received
+// Material-decision alert.
+//
+// Intent: surface large / risky entries to the operator BEFORE they execute,
+// even though v0.1 cannot poll Telegram for a STOP reply. The honest framing
+// is "you're being notified", not "you have 2 minutes to cancel" (which the
+// previous wording falsely implied).
+//
+// Returns false unconditionally — the strategy treats the lack of veto as
+// "proceed", which is intentional so the bot doesn't stall when the operator
+// is asleep. Polling getUpdates for an actual STOP reply is a roadmap item.
+export async function alertWithVeto(message) {
+  await alert(`⏸️ *Material decision* ${message}\n\n_v0.1 alerts but does not poll for replies; trade proceeds._`);
   return false;
 }
 

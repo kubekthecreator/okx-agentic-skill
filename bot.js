@@ -141,11 +141,13 @@ async function killCheckRunner() {
   if (!isShuttingDown) setTimeout(killCheckRunner, KILL_CHECK_INTERVAL_MS);
 }
 
-async function dailySummary() {
+// previousDate: the UTC date we're summarising (the one that just ended).
+// When omitted, falls back to the daily-stats date currently in state.
+async function dailySummary(previousDate) {
   const s = state.loadState();
   const winRate = s.daily.trades > 0 ? (s.daily.wins / s.daily.trades) * 100 : 0;
   await alert(
-    `📊 *Daily summary ${s.daily.date}*\n` +
+    `📊 *Daily summary ${previousDate || s.daily.date}*\n` +
     `Trades: ${s.daily.trades} (${s.daily.wins}W / ${s.daily.losses}L, ${winRate.toFixed(0)}% WR)\n` +
     `Realized PnL: $${s.daily.realized_pnl_usd.toFixed(2)}\n` +
     `State: ${s.machine_state}`,
@@ -153,14 +155,27 @@ async function dailySummary() {
   );
 }
 
-// Trigger daily summary at UTC midnight (within tick tolerance)
-let lastSummaryDate = null;
+// Trigger daily summary once per UTC day. The previous version only fired
+// during the 00:00 UTC hour, which silently skipped the report whenever the
+// bot was started later in the day. Now we persist last_summary_date in
+// state and fire whenever the date has rolled over since the last send.
 function checkDailySummary() {
-  const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-  if (now.getUTCHours() === 0 && lastSummaryDate !== today) {
-    lastSummaryDate = today;
-    dailySummary().catch(err => logger.error('daily_summary_failed', { error: err.message }));
+  const s = state.loadState();
+  const today = new Date().toISOString().slice(0, 10);
+  // First run after startup: anchor to today without emitting a report for
+  // an unknown prior day.
+  if (!s.last_summary_date) {
+    s.last_summary_date = today;
+    state.saveState();
+    return;
+  }
+  if (s.last_summary_date !== today) {
+    const previous = s.last_summary_date;
+    s.last_summary_date = today;
+    state.saveState();
+    dailySummary(previous).catch(err =>
+      logger.error('daily_summary_failed', { previous, error: err.message })
+    );
   }
 }
 
@@ -172,13 +187,32 @@ async function shutdown(signal) {
   logger.info('shutdown_initiated', { signal });
   await alert(`⏹️ Bot shutting down: ${signal}\nOpen positions left intact for next start.`);
   state.saveState();
+  // Flush the log stream so the last few lines (including this shutdown
+  // sequence) hit disk before exit. Without this they can be lost on a
+  // fast SIGTERM.
+  try { logger.flush && logger.flush(); } catch (_) { /* best effort */ }
   process.exit(0);
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+// Loud failure surface — silence here is what makes production bots quietly
+// stop working without anyone noticing.
 process.on('unhandledRejection', (err) => {
-  logger.error('unhandled_rejection', { error: err.message, stack: err.stack });
+  const msg = err && err.message ? err.message : String(err);
+  const stack = err && err.stack ? err.stack : '';
+  logger.error('unhandled_rejection', { error: msg, stack });
+  alert(`🔥 *Unhandled rejection*\n\`${msg}\``).catch(() => {});
+});
+
+process.on('uncaughtException', (err) => {
+  // Same idea, plus we don't trust the process state anymore — let systemd /
+  // docker restart us cleanly.
+  logger.error('uncaught_exception', { error: err.message, stack: err.stack });
+  alert(`🔥 *Uncaught exception — restarting*\n\`${err.message}\``)
+    .catch(() => {})
+    .finally(() => process.exit(1));
 });
 
 async function main() {
