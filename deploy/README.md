@@ -153,12 +153,14 @@ the matching `volumes:` line in [`docker-compose.yml`](docker-compose.yml).
 
 ### 3. Build + start
 
+State, holder history, and logs all live under a single mounted
+directory (`./data` → `/app/data`), so there are **no files to
+pre-create** — the bot writes them inside the mounted dir on first run,
+and `OKX_BOT_STATE_FILE` / `OKX_BOT_HOLDERS_FILE` / `OKX_BOT_LOG_DIR`
+(set in docker-compose.yml) point at them.
+
 ```bash
-mkdir -p deploy/data deploy/data/logs
-touch deploy/data/state.json deploy/data/holders_history.json
-# Files must pre-exist as files (not directories) for bind-mount to work
-# as expected.
-echo '{}' > deploy/data/holders_history.json
+mkdir -p deploy/data
 
 docker compose -f deploy/docker-compose.yml up -d --build
 docker compose -f deploy/docker-compose.yml logs -f
@@ -283,6 +285,9 @@ onchainos swap execute --chain solana --from <SPL_MINT> --to <USDC_MINT> ...
 | `state_load_failed_backup_saved` in logs | `state.json` corrupted (e.g. disk full mid-write) | A `state.json.corrupted-<ts>` was saved. Inspect; if recoverable, fix and rename back. Otherwise let the bot start fresh |
 | Bot logs `telegram_timeout` | Telegram API slow / blocked | Non-fatal, decisions still execute. Check connectivity if persistent |
 | `swap_confirming_required` alert | OKX backend wants human confirmation on a swap | Run the suggested CLI command manually OR ignore (position stays in `exit_pending` for 10min then retries) |
+| `spawn onchainos EACCES` / `ENOENT`, or `EISDIR` on state.json | Docker auto-created an empty **directory** at a bind-mount source that didn't exist as a file when `up` first ran | `docker compose down`; `sudo rm -rf` the bogus dir on the host; put a real file/binary there; `up` again. The CLI binary should be a real `cp` of `onchainos` into `/usr/local/bin/` (not a symlink into `/root/...`, which the container can't traverse). |
+| `wallet status` returns `loggedIn:false` despite host being logged in, or `Permission denied (os error 13)` writing `.onchainos` | **Docker userns-remap** is enabled — container UID 10001 maps to a different host UID, so `chown 10001` on the host auth dir doesn't grant container access | Quickest: run the container as root (`user: "0:0"` in compose) and `chown -R 0:0` + mount the auth dir to `/root/.onchainos`. Cleaner long-term: log the CLI in **from inside** the container so the session is created with the container's own identity. Check with `docker info \| grep -i userns`. |
+| `state_save_failed EBUSY: ... rename` | You're on an older compose that bind-mounted `state.json` as a **single file** | Fixed in current compose — persistence now uses a directory mount (`./data:/app/data`) + `OKX_BOT_STATE_FILE`. `git pull` and rebuild. Non-fatal regardless (caught; in-memory state stays consistent while the process runs). |
 
 For anything else, the JSON log at `logs/bot-YYYY-MM-DD.log` is the
 source of truth — every decision is recorded with full input data.

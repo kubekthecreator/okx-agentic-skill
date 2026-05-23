@@ -10,7 +10,7 @@
 import fs from 'fs';
 import path from 'path';
 
-const LOG_DIR = path.join(process.cwd(), 'logs');
+const LOG_DIR = process.env.OKX_BOT_LOG_DIR || path.join(process.cwd(), 'logs');
 const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
 const COLORS = {
   debug: '\x1b[90m',  // gray

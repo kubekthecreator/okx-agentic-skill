@@ -60,10 +60,10 @@ ENV NODE_ENV=production \
     OKX_CHAIN=solana
 
 # Healthcheck: read state.json (should always exist after first tick) and
-# confirm it parses as JSON. Fails the container if state goes corrupt
-# without the bot noticing.
+# confirm it parses as JSON. Honors OKX_BOT_STATE_FILE so it tracks the
+# same path the bot writes to (compose sets it to /app/data/state.json).
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
-  CMD node -e "JSON.parse(require('fs').readFileSync('/app/state.json','utf-8'))" || exit 1
+  CMD node -e "JSON.parse(require('fs').readFileSync(process.env.OKX_BOT_STATE_FILE || '/app/state.json','utf-8'))" || exit 1
 
 # Graceful shutdown: docker stop sends SIGTERM, bot.js handles it.
 STOPSIGNAL SIGTERM

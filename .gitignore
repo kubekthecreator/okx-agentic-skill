@@ -11,6 +11,9 @@ holders_history.json
 logs/
 *.log
 
+# Deploy-time runtime data (state + logs written by the container)
+deploy/data/
+
 # IDE / agent state
 .claude/settings.local.json
 

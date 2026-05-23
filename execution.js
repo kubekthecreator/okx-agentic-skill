@@ -19,7 +19,7 @@ const CLI = process.env.ONCHAINOS_CLI || 'onchainos';
 const CHAIN = process.env.OKX_CHAIN || 'solana';
 const DRY_RUN = process.env.DRY_RUN !== 'false';
 
-const HOLDERS_FILE = path.join(process.cwd(), 'holders_history.json');
+const HOLDERS_FILE = process.env.OKX_BOT_HOLDERS_FILE || path.join(process.cwd(), 'holders_history.json');
 
 // ─── CLI shell-out ─────────────────────────────────────────────────────────
 

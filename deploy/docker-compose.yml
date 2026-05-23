@@ -27,19 +27,27 @@ services:
     env_file:
       - ../.env
 
+    # Point bot persistence at a path INSIDE the mounted ./data directory.
+    # A single-file bind mount (e.g. ./data/state.json:/app/state.json)
+    # blocks the atomic temp+rename write with EBUSY; mounting the parent
+    # dir keeps temp + final on the same filesystem so rename works.
+    environment:
+      OKX_BOT_STATE_FILE: /app/data/state.json
+      OKX_BOT_HOLDERS_FILE: /app/data/holders_history.json
+      OKX_BOT_LOG_DIR: /app/data/logs
+
     volumes:
-      # Bot persistence — survives container restarts and rebuilds.
-      - ./data/state.json:/app/state.json
-      - ./data/holders_history.json:/app/holders_history.json
-      - ./data/logs:/app/logs
+      # Single directory mount for all persistence — survives container
+      # restarts AND recreation. No single-file bind mounts (see EBUSY note).
+      - ./data:/app/data
 
       # onchainos CLI binary, read-only. Verify the host path with
       # `command -v onchainos` and adjust if different.
       - /usr/local/bin/onchainos:/usr/local/bin/onchainos:ro
 
-      # CLI auth state. The bot user inside the container reads from
-      # /home/okxbot/.onchainos, which we map to the host operator's
-      # actual CLI config.
+      # CLI auth state, read-only. Map the operator's logged-in CLI config.
+      # On hosts with Docker userns-remap enabled, the container UID won't
+      # match the host file owner — see deploy/README.md troubleshooting.
       - ${HOME}/.onchainos:/home/okxbot/.onchainos:ro
 
     # Stay on the host network so DNS / IPv6 / outbound to OKX behave

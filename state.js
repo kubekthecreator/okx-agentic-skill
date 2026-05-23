@@ -41,7 +41,11 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { logger } from './logger.js';
 
-const STATE_FILE = path.join(process.cwd(), 'state.json');
+// OKX_BOT_STATE_FILE lets the deploy point this at a path inside a mounted
+// directory (e.g. /app/data/state.json). Single-file Docker bind mounts
+// block the atomic temp+rename write with EBUSY; writing inside a mounted
+// dir keeps temp and final on the same filesystem so rename works.
+const STATE_FILE = process.env.OKX_BOT_STATE_FILE || path.join(process.cwd(), 'state.json');
 const TMP_FILE = STATE_FILE + '.tmp';
 
 const DEFAULT_STATE = () => ({
