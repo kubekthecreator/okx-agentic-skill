@@ -278,9 +278,69 @@ trades, next decision window.
 bot made. If a trade went wrong, the log shows exactly which signals fired
 and what the bot thought was happening.
 
-## Live evidence — dry-run output (18 May 2026, UTC)
+## Production run — 19–23 May 2026 (~90h continuous, dry-run on VPS)
 
-These are unedited excerpts from a real dry-run against the production
+The bot was deployed to a Hetzner VPS via the `deploy/` docker-compose
+setup and left running in dry-run for **~90.6 hours** (2026-05-19
+21:30 UTC → 2026-05-23 16:08 UTC), reading live OnchainOS data the
+whole time. Numbers below are extracted directly from the daily JSON
+logs (`deploy/data/logs/bot-2026-05-*.log`), which persist on the host
+volume independent of the container.
+
+| Metric | Value |
+|---|---|
+| Continuous uptime | ~90.6 h across 5 calendar days |
+| Total ticks | **4,750** (≈1,257/full-day, ~68s/tick incl. per-token CLI work) |
+| Crashes | **0** — zero unhandled rejections, zero uncaught exceptions |
+| Daily summaries fired | **4 / 4** on schedule at 00:00 UTC |
+| Transient API errors | 69 `cli_call_failed` (≈1.5% of CLI calls), **all auto-recovered** |
+| Tick failures from those errors | 0 — every transient error degraded gracefully (empty candles / catalyst=0), never propagated |
+
+Ticks per day (partial on first/last day):
+
+```
+bot-2026-05-19.log:  128 ticks   (from 21:30 UTC)
+bot-2026-05-20.log: 1257 ticks
+bot-2026-05-21.log: 1255 ticks
+bot-2026-05-22.log: 1260 ticks
+bot-2026-05-23.log:  850 ticks   (until 16:08 UTC)
+```
+
+The four daily summaries, verbatim from the logs:
+
+```json
+{"ts":"2026-05-20T00:00:28.045Z","msg":"alert","message":"📊 Daily summary 2026-05-19\nTrades: 0 (0W / 0L, 0% WR)\nRealized PnL: $0.00\nState: Normal"}
+{"ts":"2026-05-21T00:00:42.755Z","msg":"alert","message":"📊 Daily summary 2026-05-20\nTrades: 0 (0W / 0L, 0% WR)\nRealized PnL: $0.00\nState: Normal"}
+{"ts":"2026-05-22T00:00:58.876Z","msg":"alert","message":"📊 Daily summary 2026-05-21\nTrades: 0 (0W / 0L, 0% WR)\nRealized PnL: $0.00\nState: Normal"}
+{"ts":"2026-05-23T00:00:16.013Z","msg":"alert","message":"📊 Daily summary 2026-05-22\nTrades: 0 (0W / 0L, 0% WR)\nRealized PnL: $0.00\nState: Normal"}
+```
+
+Zero trades is the **correct** outcome: across ~90h none of the eight
+blue-chip SPL tokens cleared all four hard signals simultaneously
+(catalyst confirmation is the usual blocker — see the dry-run
+breakdown below). The bot did exactly what a disciplined trend-follower
+should: it waited.
+
+### Honest notes on the run
+
+- **Day-1 deployment teething.** `bot-2026-05-19.log` contains 10
+  `main_failed` errors — these were a state-file bootstrap issue during
+  the initial container setup (empty `state.json` from a bind-mount
+  edge case), resolved in-session. **Zero `main_failed` occurred on any
+  subsequent day.** The figures above describe steady-state operation
+  after setup completed at ~21:37 UTC on day 1.
+- **Known limitation — `state_save_failed` (EBUSY).** Docker
+  bind-mounting `state.json` as a single file blocks the atomic
+  temp+rename write. The error is caught (`saveState` try/catch) and
+  non-fatal — in-memory state stayed consistent for the full 90h, which
+  is why daily summaries kept firing correctly across the run. The fix
+  (mount the data *directory*, not individual files) is tracked; it only
+  affects state durability across container *recreation*, not running
+  operation.
+
+### Local dry-run detail — 18 May 2026
+
+These are unedited excerpts from a local dry-run against the production
 OnchainOS endpoints. The bot reads live balance, candles, smart-money
 signals, and holder counts. Each block below is verbatim from the
 console + JSON log (`logs/bot-2026-05-18.log`).
