@@ -32,3 +32,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# OMC plugin session state (local tooling, never ship)
+.omc/
