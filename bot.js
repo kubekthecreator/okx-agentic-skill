@@ -18,7 +18,7 @@ const execFileP = promisify(execFile);
 
 const TICK_INTERVAL_MS = parseInt(process.env.TICK_INTERVAL_MS || '60000', 10);
 const KILL_CHECK_INTERVAL_MS = 5 * 60 * 1000;
-const CATALYST_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+const HOLDER_SNAPSHOT_INTERVAL_MS = 60 * 60 * 1000;
 
 const TOKENS = JSON.parse(
   fs.readFileSync(path.join(process.cwd(), 'tokens.json'), 'utf-8')
@@ -52,7 +52,7 @@ function printBanner() {
   const dryRun = process.env.DRY_RUN !== 'false';
   console.log(`
 ╔════════════════════════════════════════════════════════════════╗
-║         OKX Agentic Wallet — Trend-Follower Skill v0.1         ║
+║         OKX Agentic Wallet — Trend-Follower Skill v0.2         ║
 ║                                                                ║
 ║  Mode:        ${(dryRun ? 'DRY RUN (no real trades)' : 'LIVE TRADING').padEnd(48)}    ║
 ║  Tick:        ${(TICK_INTERVAL_MS / 1000 + 's').padEnd(48)}    ║
@@ -75,8 +75,10 @@ async function tick() {
   tickCount++;
 
   try {
-    const portfolio_usd = await execution.getPortfolioValueUsd();
-    const cash_usd = await execution.getCashUsd();
+    // One `wallet balance` call per tick; derive both figures from it.
+    const balances = await execution.fetchBalances();
+    const portfolio_usd = execution.portfolioValueFromBalances(balances);
+    const cash_usd = execution.cashFromBalances(balances);
 
     // Rotate daily stats if needed
     state.rotateDaily(portfolio_usd);
@@ -129,10 +131,28 @@ async function killCheckLoop() {
   }
 }
 
+// Hourly holder-count snapshot per whitelisted token. This is what feeds the
+// "on-chain spike" catalyst (holders +5% / 24h): the CLI has no historical
+// holders endpoint, so the bot has to build the 24h baseline itself.
+async function holderSnapshotLoop() {
+  if (isShuttingDown) return;
+  try {
+    await execution.refreshHolderSnapshots(TOKENS.tokens.map(t => t.mint));
+  } catch (err) {
+    logger.error('holder_snapshot_loop_failed', { error: err.message });
+  }
+}
+
 async function tickRunner() {
   if (isShuttingDown) return;
   await tick();
   if (!isShuttingDown) setTimeout(tickRunner, TICK_INTERVAL_MS);
+}
+
+async function holderSnapshotRunner() {
+  if (isShuttingDown) return;
+  await holderSnapshotLoop();
+  if (!isShuttingDown) setTimeout(holderSnapshotRunner, HOLDER_SNAPSHOT_INTERVAL_MS);
 }
 
 async function killCheckRunner() {
@@ -247,8 +267,11 @@ async function main() {
   await alert(`🚀 Bot started\nMode: ${process.env.DRY_RUN === 'false' ? 'LIVE' : 'DRY RUN'}\nPortfolio: $${startingPortfolio.toFixed(2)}`);
 
   // Self-rescheduling loops — no setInterval, no overlap.
+  // Holder snapshots first so the very first tick already has a data point.
+  await holderSnapshotLoop();
   tickRunner();
   setTimeout(killCheckRunner, KILL_CHECK_INTERVAL_MS);
+  setTimeout(holderSnapshotRunner, HOLDER_SNAPSHOT_INTERVAL_MS);
   setInterval(checkDailySummary, 60_000);  // pure clock check, no IO; safe
 }
 

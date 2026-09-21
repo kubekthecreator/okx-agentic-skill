@@ -12,15 +12,15 @@ import signals from '../signals.js';
 
 // ─── Test fixtures ────────────────────────────────────────────────────────
 
-// 25 hourly candles. SMA(last 4) ≈ 110, last1h_volume = 200, avg24h_volume = 100,
-// so volume ratio = 2.0 (passes 1.5× momentum threshold).
+// 25 CLOSED hourly candles. SMA(last 4) ≈ 110, last1h_volume = 200,
+// avg24h_volume (the 24 bars before it) = 100, so ratio = 2.0 (passes 1.5×).
 function fixtureBullishCandles() {
   const candles = [];
   for (let i = 0; i < 24; i++) {
-    candles.push({ ts: '', open: 100, high: 105, low: 95, close: 100, volume_usd: 100 });
+    candles.push({ ts: '', open: 100, high: 105, low: 95, close: 100, volume_usd: 100, complete: true });
   }
   // Last candle: price spike + volume spike
-  candles.push({ ts: '', open: 100, high: 115, low: 100, close: 115, volume_usd: 200 });
+  candles.push({ ts: '', open: 100, high: 115, low: 100, close: 115, volume_usd: 200, complete: true });
   // Bump last 3 closes so SMA(4) reflects a real uptrend without overshooting
   // the not-extended threshold (price <= 1.15 × SMA).
   candles[candles.length - 4].close = 105;
@@ -33,7 +33,7 @@ function fixtureBullishCandles() {
 function fixtureFlatCandles() {
   const candles = [];
   for (let i = 0; i < 25; i++) {
-    candles.push({ ts: '', open: 100, high: 100, low: 100, close: 100, volume_usd: 100 });
+    candles.push({ ts: '', open: 100, high: 100, low: 100, close: 100, volume_usd: 100, complete: true });
   }
   return candles;
 }
@@ -67,7 +67,7 @@ test('signalMomentum fails on flat volume', () => {
 });
 
 test('signalMomentum returns insufficient_data with <25 candles', () => {
-  const r = signals.signalMomentum([{ ts: '', open: 1, high: 1, low: 1, close: 1, volume_usd: 1 }]);
+  const r = signals.signalMomentum([{ ts: '', open: 1, high: 1, low: 1, close: 1, volume_usd: 1, complete: true }]);
   assert.equal(r.passed, false);
   assert.equal(r.reason, 'insufficient_data');
 });
@@ -156,4 +156,68 @@ test('evaluateEntry passes when all 4 signals + smart_money catalyst align', () 
   });
   assert.equal(r.passed, true);
   assert.match(r.setup_id, /smart_money/);
+});
+
+// ─── completedCandles / in-progress bar handling ──────────────────────────
+
+test('completedCandles keeps everything when the newest bar is marked complete', () => {
+  const c = fixtureFlatCandles();
+  assert.equal(signals.completedCandles(c).length, 25);
+});
+
+test('completedCandles drops the newest bar when the complete flag is absent', () => {
+  const c = fixtureFlatCandles().map(({ complete, ...rest }) => rest);
+  assert.equal(signals.completedCandles(c).length, 24);
+});
+
+test('completedCandles drops every trailing bar explicitly marked in-progress', () => {
+  const c = fixtureFlatCandles();
+  c.push({ ts: '', open: 100, high: 100, low: 100, close: 100, volume_usd: 3, complete: false });
+  const closed = signals.completedCandles(c);
+  assert.equal(closed.length, 25);
+  assert.equal(closed[closed.length - 1].volume_usd, 100);
+});
+
+test('signalMomentum ignores the in-progress bar (near-zero volume right after the hour)', () => {
+  // Bullish fixture qualifies on its closed bars. Appending the current
+  // hour's bar with 1% of normal volume must NOT flip momentum to fail.
+  const c = fixtureBullishCandles();
+  c.push({ ts: '', open: 115, high: 115, low: 115, close: 115, volume_usd: 1, complete: false });
+  const r = signals.signalMomentum(c);
+  assert.equal(r.passed, true);
+  assert.equal(r.last_1h_volume_usd, 200, 'uses the last CLOSED bar');
+});
+
+test('signalMomentum needs 25 closed bars — 25 with an unflagged newest one is insufficient', () => {
+  const c = fixtureBullishCandles().map(({ complete, ...rest }) => rest);
+  const r = signals.signalMomentum(c);
+  assert.equal(r.passed, false);
+  assert.equal(r.reason, 'insufficient_data');
+});
+
+// ─── evaluatePriceSignals (chart-only pre-check) ──────────────────────────
+
+test('evaluatePriceSignals passes on the bullish fixture and names no reason', () => {
+  const r = signals.evaluatePriceSignals(fixtureBullishCandles());
+  assert.equal(r.passed, true);
+  assert.equal(r.reason, null);
+  assert.deepEqual(Object.keys(r.breakdown), ['trend', 'momentum', 'valuation']);
+});
+
+test('evaluatePriceSignals reports the first failing chart signal', () => {
+  const r = signals.evaluatePriceSignals(fixtureFlatCandles());
+  assert.equal(r.passed, false);
+  assert.equal(r.reason, 'trend_failed');
+});
+
+test('evaluateEntry breakdown keeps the trend→momentum→valuation→catalyst→rs order', () => {
+  const r = signals.evaluateEntry({
+    candles: fixtureBullishCandles(),
+    refCandles: fixtureFlatCandles(),
+    catalysts: { smart_money_buyers_6h: 0, smart_money_volume_6h_usd: 0, holder_growth_24h_pct: 0, news_mentions_24h: 0 },
+    machineState: 'Normal',
+  });
+  assert.equal(r.passed, false);
+  assert.equal(r.reason, 'catalyst_failed');
+  assert.deepEqual(Object.keys(r.breakdown), ['trend', 'momentum', 'valuation', 'catalyst', 'rs']);
 });
