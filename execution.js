@@ -112,7 +112,10 @@ export async function fetchCandles(tokenMint, n = 48) {
       '--bar', '1H',
       '--limit', String(n),
     ]);
-    // CLI returns newest-first; reverse for newest-last
+    // CLI returns newest-first; reverse for newest-last.
+    // `confirm` ("1" = bar closed, "0" = in progress) is passed through as
+    // `complete`; signals.completedCandles() uses it to keep volume maths
+    // off the in-progress bar. Left undefined when the source omits it.
     return (rows || []).slice().reverse().map(r => ({
       ts: new Date(parseInt(r.ts, 10)).toISOString(),
       open: parseFloat(r.o),
@@ -120,6 +123,7 @@ export async function fetchCandles(tokenMint, n = 48) {
       low: parseFloat(r.l),
       close: parseFloat(r.c),
       volume_usd: parseFloat(r.volUsd || 0),
+      complete: r.confirm === undefined || r.confirm === null ? undefined : String(r.confirm) === '1',
     }));
   } catch (err) {
     logger.warn('candles_fallback', { token: tokenMint, error: err.message });
@@ -162,50 +166,89 @@ async function fetchSmartMoneyActivity(tokenMint) {
   };
 }
 
-async function fetchOnChainActivity(tokenMint) {
-  // The CLI has no historical-holders endpoint, so we snapshot to
-  // holders_history.json each tick and compare against a ~24h-old snapshot.
-  const rows = await cli([
-    'token', 'price-info',
-    '--chain', CHAIN,
-    '--address', tokenMint,
-  ]);
-  const current = parseInt(rows?.[0]?.holders || '0', 10);
-  if (!current) return { holder_growth_24h_pct: 0 };
+// ─── Holder growth (on-chain spike catalyst) ───────────────────────────────
+//
+// The CLI has no historical-holders endpoint, so the bot keeps its own series
+// of hourly holder-count snapshots per token in holders_history.json:
+//   { [mint]: [{ ts, holders }, ...] }   oldest-first, ~26h retained
+// bot.js refreshes the snapshots on an hourly loop (refreshHolderSnapshots);
+// fetchOnChainActivity only READS the series, so evaluating a catalyst costs
+// no CLI call. v0.1 kept a two-point {ts, holders, prev_ts, prev_holders}
+// record that rolled forward hourly and therefore never aged past ~1h — the
+// 24h baseline was never established and the catalyst could never fire.
 
+const HOLDER_SNAPSHOT_MIN_GAP_MS = 55 * 60 * 1000;   // one snapshot per hour per token
+const HOLDER_HISTORY_KEEP_MS = 26 * 3600_000;
+const HOLDER_BASELINE_MIN_AGE_MS = 20 * 3600_000;    // tolerate restarts / missed hours
+const HOLDER_SELF_HEAL_AGE_MS = 2 * 3600_000;
+
+// Accepts both the current array shape and the legacy v0.1 record.
+export function normalizeHolderSeries(entry) {
+  if (Array.isArray(entry)) return entry.filter(p => p && p.ts && p.holders);
+  if (entry && typeof entry === 'object') {
+    const out = [];
+    if (entry.prev_ts && entry.prev_holders) out.push({ ts: entry.prev_ts, holders: entry.prev_holders });
+    if (entry.ts && entry.holders) out.push({ ts: entry.ts, holders: entry.holders });
+    return out;
+  }
+  return [];
+}
+
+// Pure. Growth (%) from the snapshot closest to 24h ago (≥20h old) to the
+// newest one. null until a baseline exists.
+export function holderGrowthPct(series, now = Date.now()) {
+  if (!Array.isArray(series) || series.length < 2) return null;
+  const newest = series[series.length - 1];
+  const eligible = series.filter(p => now - p.ts >= HOLDER_BASELINE_MIN_AGE_MS);
+  if (eligible.length === 0) return null;
+  const target = now - 24 * 3600_000;
+  const baseline = eligible.reduce((best, p) =>
+    Math.abs(p.ts - target) < Math.abs(best.ts - target) ? p : best
+  );
+  if (!baseline.holders || baseline === newest) return null;
+  return ((newest.holders - baseline.holders) / baseline.holders) * 100;
+}
+
+// Take a fresh holder-count snapshot for each mint that doesn't have one from
+// the last ~hour. Called hourly from bot.js; `force` bypasses the gap check.
+export async function refreshHolderSnapshots(mints, { force = false } = {}) {
   const history = readHoldersHistory();
-  const past = history[tokenMint];
   const now = Date.now();
+  let changed = false;
 
-  if (!past) {
-    history[tokenMint] = { ts: now, holders: current, prev_ts: null, prev_holders: null };
-    writeHoldersHistory(history);
-    return { holder_growth_24h_pct: 0 };
+  for (const mint of mints) {
+    const series = normalizeHolderSeries(history[mint]);
+    const newest = series[series.length - 1];
+    if (!force && newest && now - newest.ts < HOLDER_SNAPSHOT_MIN_GAP_MS) continue;
+    try {
+      const rows = await cli(['token', 'price-info', '--chain', CHAIN, '--address', mint]);
+      const holders = parseInt(rows?.[0]?.holders || '0', 10);
+      if (!holders) continue;
+      series.push({ ts: now, holders });
+      history[mint] = series.filter(p => now - p.ts <= HOLDER_HISTORY_KEEP_MS);
+      changed = true;
+    } catch (err) {
+      logger.warn('holder_snapshot_failed', { token: mint, error: err.message });
+    }
   }
 
-  const ageH = (now - past.ts) / 3600_000;
-  let baseline = null;
-  if (past.prev_holders && past.prev_ts && (now - past.prev_ts) >= 23 * 3600_000) {
-    baseline = past.prev_holders;
-  } else if (ageH >= 23) {
-    baseline = past.holders;
+  if (changed) writeHoldersHistory(history);
+  return changed;
+}
+
+async function fetchOnChainActivity(tokenMint) {
+  let series = normalizeHolderSeries(readHoldersHistory()[tokenMint]);
+  const newest = series[series.length - 1];
+
+  // Self-heal: if the hourly loop hasn't covered this token recently (first
+  // run, loop failure), snapshot now so the series keeps building.
+  if (!newest || Date.now() - newest.ts > HOLDER_SELF_HEAL_AGE_MS) {
+    await refreshHolderSnapshots([tokenMint], { force: true });
+    series = normalizeHolderSeries(readHoldersHistory()[tokenMint]);
   }
 
-  // Roll forward at most once per hour to keep file small.
-  if (ageH >= 1) {
-    const promote = ageH >= 23;
-    history[tokenMint] = {
-      ts: now,
-      holders: current,
-      prev_ts: promote ? past.ts : past.prev_ts,
-      prev_holders: promote ? past.holders : past.prev_holders,
-    };
-    writeHoldersHistory(history);
-  }
-
-  if (!baseline) return { holder_growth_24h_pct: 0 };
-  const growth = ((current - baseline) / baseline) * 100;
-  return { holder_growth_24h_pct: growth };
+  const growth = holderGrowthPct(series);
+  return { holder_growth_24h_pct: growth ?? 0 };
 }
 
 function readHoldersHistory() {
@@ -235,15 +278,23 @@ export async function fetchBalances() {
   }));
 }
 
-export async function getPortfolioValueUsd() {
-  const balances = await fetchBalances();
+// Pure helpers so a caller holding one balance snapshot (the main tick) can
+// derive every figure it needs without a second `wallet balance` call.
+export function portfolioValueFromBalances(balances) {
   return balances.reduce((acc, b) => acc + b.value_usd, 0);
 }
 
-export async function getCashUsd() {
-  const balances = await fetchBalances();
+export function cashFromBalances(balances) {
   const usdc = balances.find(b => b.symbol === 'USDC');
   return usdc?.value_usd || 0;
+}
+
+export async function getPortfolioValueUsd() {
+  return portfolioValueFromBalances(await fetchBalances());
+}
+
+export async function getCashUsd() {
+  return cashFromBalances(await fetchBalances());
 }
 
 export async function getSolGasBalance() {
@@ -300,6 +351,11 @@ export async function executeSwap({ fromMint, toMint, amount, clientOrderId, max
 
   // Live execution: one-shot quote→sign→broadcast via the CLI.
   // The CLI binds to the currently logged-in wallet (`wallet status`).
+  //
+  // attempts: 1 — a swap is NOT idempotent. If the CLI times out the
+  // transaction may already be broadcast; the generic transient retry would
+  // then submit it a second time (double buy / double sell). A timed-out
+  // swap surfaces as an error and the caller reconciles on the next tick.
   const wallet = await getActiveWalletAddress();
   try {
     const data = await cli([
@@ -310,7 +366,7 @@ export async function executeSwap({ fromMint, toMint, amount, clientOrderId, max
       '--amount', String(amount),
       '--wallet', wallet,
       '--slippage', '0.5',
-    ], { timeout: 90_000 });
+    ], { timeout: 90_000, attempts: 1 });
 
     const txHash = data?.txHash || data?.orderId || data?.txId;
     const toDecimals = parseInt(data?.toToken?.decimal || '0', 10);
@@ -363,7 +419,12 @@ export async function preflightCheck() {
 export default {
   fetchCandles,
   fetchCatalysts,
+  refreshHolderSnapshots,
+  holderGrowthPct,
+  normalizeHolderSeries,
   fetchBalances,
+  portfolioValueFromBalances,
+  cashFromBalances,
   getPortfolioValueUsd,
   getCashUsd,
   getSolGasBalance,

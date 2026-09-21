@@ -20,15 +20,7 @@ const TIME_STOP_MS = 5 * 24 * 60 * 60 * 1000;  // 5 days
 const VOLUME_COLLAPSE_PCT = 70;
 const VETO_THRESHOLD_FRACTION = 0.15;  // positions > 15% of portfolio need veto
 const EXIT_PENDING_STALE_MS = 10 * 60 * 1000;  // 10 min: stuck exit_pending → clear
-
-async function fetchCandlesWithRetry(mint, n, attempts = 3, delayMs = 500) {
-  for (let i = 0; i < attempts; i++) {
-    const candles = await execution.fetchCandles(mint, n);
-    if (candles.length > 0) return candles;
-    if (i < attempts - 1) await new Promise(r => setTimeout(r, delayMs));
-  }
-  return [];
-}
+const MIN_COMPLETED_CANDLES = 25;  // momentum needs 1h + 24h of closed bars
 
 // ─── New entries ───────────────────────────────────────────────────────────
 
@@ -44,10 +36,21 @@ export async function evaluateNewEntries({ tokens, baseToken, referenceMint, por
 
     // Fetch data
     const candles = await execution.fetchCandles(token.mint, 48);
-    if (candles.length < 24) {
-      logger.debug('skip_insufficient_candles', { token: token.symbol });
+    if (signals.completedCandles(candles).length < MIN_COMPLETED_CANDLES) {
+      logger.debug('skip_insufficient_candles', { token: token.symbol, candles: candles.length });
       continue;
     }
+
+    // Chart-only signals first: pure and already paid for. Catalyst data is
+    // another CLI call per token, so only fetch it once the chart qualifies.
+    // (In the May-2026 dry run the chart gate rejected ~all tokens on every
+    // tick, so this roughly halves per-tick CLI traffic.)
+    const price = signals.evaluatePriceSignals(candles);
+    if (!price.passed) {
+      logger.debug('signal_eval', { token: token.symbol, passed: false, reason: price.reason });
+      continue;
+    }
+
     const catalysts = await execution.fetchCatalysts(token.mint);
 
     // Evaluate
@@ -104,12 +107,12 @@ export async function evaluateNewEntries({ tokens, baseToken, referenceMint, por
     }
 
     // Execute
-    await openPosition({ token, baseToken, size_usd: size, signals: eval_ });
+    await openPosition({ token, baseToken, size_usd: size, signals: eval_, candles });
     cash_usd -= size;
   }
 }
 
-async function openPosition({ token, baseToken, size_usd, signals: ev }) {
+async function openPosition({ token, baseToken, size_usd, signals: ev, candles }) {
   const clientOrderId = `entry-${randomUUID()}`;
   const fromAmount = String(Math.floor(size_usd * Math.pow(10, baseToken.decimals)));
 
@@ -136,11 +139,11 @@ async function openPosition({ token, baseToken, size_usd, signals: ev }) {
     return;
   }
 
-  // Resolve entry price. Prefer quote-derived unit price (already paid for),
-  // fall back to candle fetch with retry. If both fail, the position would
-  // be untrackable (NaN pnl_pct disables all exit logic) — abort and alert.
-  const candles = await fetchCandlesWithRetry(token.mint, 1, 3);
-  const candle_price = candles.length > 0 ? candles[candles.length - 1].close : null;
+  // Resolve entry price. Prefer the quote-derived unit price (already paid
+  // for); fall back to the latest close of the candles this entry was
+  // evaluated on (seconds old). If both fail, the position would be
+  // untrackable (NaN pnl_pct disables all exit logic) — abort and alert.
+  const candle_price = signals.lastPrice(candles);
   const entry_price_usd = fill.to_token_unit_price_usd ?? candle_price;
 
   if (!entry_price_usd || !Number.isFinite(entry_price_usd)) {
@@ -169,6 +172,10 @@ async function openPosition({ token, baseToken, size_usd, signals: ev }) {
     setup_id: ev.setup_id,
     kill_conditions: buildKillConditions(ev, candles),
     entry_tx_id: fill.tx_id,
+    // Running totals for partial exits, so the final close can compute the
+    // true blended PnL (see computeRealizedPnl).
+    scale_out_proceeds_usd: 0,
+    scale_out_cost_usd: 0,
   });
 
   await alert(
@@ -179,16 +186,11 @@ async function openPosition({ token, baseToken, size_usd, signals: ev }) {
     `TX: \`${fill.tx_id}\`` +
     (fill.dry_run ? '\n_(dry run)_' : '')
   );
+  return position;
 }
 
-function buildKillConditions(ev, candles) {
-  const peakVol = Math.max(...candles.map(c => c.volume_usd));
-  return [
-    {
-      type: 'volume_collapse',
-      reference_volume_usd: peakVol,
-      drop_threshold_pct: VOLUME_COLLAPSE_PCT,
-    },
+export function buildKillConditions(ev, candles) {
+  const conditions = [
     {
       type: 'time_stop',
       max_hold_ms: TIME_STOP_MS,
@@ -199,6 +201,22 @@ function buildKillConditions(ev, candles) {
       original_catalysts: ev.breakdown.catalyst.catalysts_active.map(c => c.type),
     },
   ];
+
+  // Volume reference = the last COMPLETED hourly bar at entry, i.e. the bar
+  // that qualified the momentum signal. Never the in-progress bar (near-zero
+  // volume right after the hour turns over), and never Math.max over an
+  // empty array (-Infinity → NaN drop% → the condition silently never fires).
+  const closed = signals.completedCandles(candles);
+  const refVol = closed.length > 0 ? closed[closed.length - 1].volume_usd : 0;
+  if (Number.isFinite(refVol) && refVol > 0) {
+    conditions.push({
+      type: 'volume_collapse',
+      reference_volume_usd: refVol,
+      drop_threshold_pct: VOLUME_COLLAPSE_PCT,
+    });
+  }
+
+  return conditions;
 }
 
 // ─── Position management ───────────────────────────────────────────────────
@@ -275,10 +293,11 @@ async function managePosition(pos, baseToken) {
     return closeAll(pos, baseToken, current_price, 'time_stop_5d');
   }
 
-  // 4. Volume collapse (kill condition)
+  // 4. Volume collapse (kill condition) — compares completed bars only.
   const volKill = pos.kill_conditions.find(k => k.type === 'volume_collapse');
-  if (volKill) {
-    const recentVol = candles[candles.length - 1].volume_usd;
+  const closed = signals.completedCandles(candles);
+  if (volKill && volKill.reference_volume_usd > 0 && closed.length > 0) {
+    const recentVol = closed[closed.length - 1].volume_usd;
     const dropPct = ((volKill.reference_volume_usd - recentVol) / volKill.reference_volume_usd) * 100;
     if (dropPct >= volKill.drop_threshold_pct) {
       return closeAll(pos, baseToken, current_price, `volume_collapse_${dropPct.toFixed(0)}pct`);
@@ -315,16 +334,25 @@ async function checkScaleOuts(pos, baseToken, pnl_pct, current_price) {
         amount: String(Math.floor(amount_to_sell * Math.pow(10, pos.token.decimals))),
         clientOrderId,
       });
-      const remaining = pos.current_amount_token - amount_to_sell;
-      state.updatePosition(pos.id, {
+      // Book the partial: proceeds actually received (USDC) against the
+      // entry cost of the fraction sold. Falls back to mark price if the
+      // fill amount is missing.
+      const proceeds_usd = fill.filled_amount > 0
+        ? fill.filled_amount
+        : amount_to_sell * current_price;
+      const cost_usd = pos.entry_value_usd * level.fraction;
+      const updates = {
         scale_outs_done: [...pos.scale_outs_done, level.pct],
-        current_amount_token: remaining,
-      });
-      pos.scale_outs_done.push(level.pct);
-      pos.current_amount_token = remaining;
+        current_amount_token: pos.current_amount_token - amount_to_sell,
+        scale_out_proceeds_usd: (pos.scale_out_proceeds_usd || 0) + proceeds_usd,
+        scale_out_cost_usd: (pos.scale_out_cost_usd || 0) + cost_usd,
+      };
+      state.updatePosition(pos.id, updates);
+      Object.assign(pos, updates);
       await alert(
         `📤 *SCALE-OUT ${pos.token.symbol} @ +${level.pct}%*\n` +
-        `Sold ${(level.fraction * 100).toFixed(0)}% (${amount_to_sell.toFixed(4)})\n` +
+        `Sold ${(level.fraction * 100).toFixed(0)}% (${amount_to_sell.toFixed(4)}) for $${proceeds_usd.toFixed(2)}\n` +
+        `Booked: ${fmtSigned(proceeds_usd - cost_usd, '$')}\n` +
         `TX: \`${fill.tx_id}\``
       );
     } catch (err) {
@@ -381,9 +409,42 @@ async function closeAll(pos, baseToken, current_price, reason) {
   }
 }
 
+// Pure. True realized PnL of a position at close, including every partial
+// exit that came before it.
+//
+// v0.1 computed entry_value × (exit_price − entry_price) / entry_price for
+// the WHOLE position, ignoring that 20–80% of it may already have been sold
+// higher. A position scaled out at +15% and +30% and then hard-stopped at
+// −10% is a +7% winner in reality; v0.1 booked it as a −10% loser, which
+// fed consecutive_losses and could halt the bot after a profitable run.
+export function computeRealizedPnl(pos, { exit_proceeds_usd = null, current_price = null } = {}) {
+  const entryAmount = pos.entry_amount_token || 0;
+  const remainingAmount = Math.max(0, pos.current_amount_token ?? entryAmount);
+  const remainingFraction = entryAmount > 0 ? Math.min(1, remainingAmount / entryAmount) : 0;
+  const remainingCost = (pos.entry_value_usd || 0) * remainingFraction;
+
+  let remainingProceeds;
+  if (exit_proceeds_usd != null && exit_proceeds_usd > 0) {
+    remainingProceeds = exit_proceeds_usd;
+  } else if (Number.isFinite(current_price)) {
+    remainingProceeds = remainingAmount * current_price;
+  } else {
+    remainingProceeds = remainingCost;  // unknown mark → book the residue flat
+  }
+
+  const scaleOutPnl = (pos.scale_out_proceeds_usd || 0) - (pos.scale_out_cost_usd || 0);
+  const realized_pnl_usd = scaleOutPnl + (remainingProceeds - remainingCost);
+  const realized_pnl_pct = pos.entry_value_usd > 0
+    ? (realized_pnl_usd / pos.entry_value_usd) * 100
+    : 0;
+  return { realized_pnl_usd, realized_pnl_pct };
+}
+
 async function finalizeClose(pos, current_price, reason, fill = null) {
-  const realized_pnl_pct = ((current_price - pos.entry_price_usd) / pos.entry_price_usd) * 100;
-  const realized_pnl_usd = pos.entry_value_usd * (realized_pnl_pct / 100);
+  const { realized_pnl_usd, realized_pnl_pct } = computeRealizedPnl(pos, {
+    exit_proceeds_usd: fill?.filled_amount ?? null,
+    current_price,
+  });
 
   // The close itself must always finalize even if the post-close balance
   // read blips. Post-win cooldown is just a derived behavior; losing it for
@@ -409,15 +470,22 @@ async function finalizeClose(pos, current_price, reason, fill = null) {
 
   const emoji = realized_pnl_usd > 0 ? '✅' : '❌';
   await alert(
-    `${emoji} *EXIT ${pos.token.symbol}* @ +${realized_pnl_pct.toFixed(2)}%\n` +
+    `${emoji} *EXIT ${pos.token.symbol}* @ ${fmtSigned(realized_pnl_pct, '', '%')}\n` +
     `Reason: \`${reason}\`\n` +
-    `PnL: $${realized_pnl_usd.toFixed(2)}\n` +
-    `Peak was: +${pos.peak_pnl_pct.toFixed(2)}%\n` +
+    `PnL: ${fmtSigned(realized_pnl_usd, '$')}\n` +
+    `Peak was: ${fmtSigned(pos.peak_pnl_pct, '', '%')}\n` +
     `Exit quality: ${trade.exit_quality !== null ? (trade.exit_quality * 100).toFixed(0) + '%' : 'n/a'}`
   );
+}
+
+function fmtSigned(v, prefix = '', suffix = '') {
+  const sign = v > 0 ? '+' : v < 0 ? '−' : '';
+  return `${sign}${prefix}${Math.abs(v).toFixed(2)}${suffix}`;
 }
 
 export default {
   evaluateNewEntries,
   manageOpenPositions,
+  computeRealizedPnl,
+  buildKillConditions,
 };

@@ -22,34 +22,56 @@ const DAILY_PROFIT_TARGET_PCT = 5;
 
 const POST_WIN_THRESHOLD_PCT = 3;  // PnL above this triggers cooldown
 
+function dailyPnlPct(daily) {
+  return daily.starting_portfolio_usd > 0
+    ? (daily.realized_pnl_usd / daily.starting_portfolio_usd) * 100
+    : 0;
+}
+
 // ─── State machine evaluation ──────────────────────────────────────────────
 
 // Call at start of every tick. Reconciles current state with live conditions.
-export function evaluateState(portfolio_usd) {
+//
+// Halt triggers are LEVELS (consecutive_losses stays ≥3 until a win or
+// midnight) but a halt is an EDGE: serve the 4h cooldown once, drop to Slow,
+// and only halt again if a new trade closes and the condition still holds.
+// v0.1 re-evaluated the level right after expiry and re-entered Halted
+// every 4h until midnight — the documented "after 4h → Slow" never happened
+// and Telegram got a fresh HALTED alert every cooldown.
+export function evaluateState(_portfolio_usd) {
   const s = state.loadState();
   const now = new Date();
 
-  // Auto-recover from Halted if cooldown expired → transition to Slow
-  if (s.machine_state === 'Halted' && s.halt_until && new Date(s.halt_until) <= now) {
-    state.setMachineState('Slow');
-    logger.info('halt_cooldown_expired_to_slow');
+  if (s.machine_state === 'Halted') {
+    if (s.halt_until && new Date(s.halt_until) <= now) {
+      state.setMachineState('Slow');
+      logger.info('halt_cooldown_expired_to_slow');
+    } else {
+      return { state: 'Halted', reason: s.halt_trigger?.reason || 'halted' };
+    }
   }
 
   // Check Halted triggers
-  const haltReason = checkHaltTriggers(portfolio_usd);
+  const haltReason = checkHaltTriggers();
   if (haltReason) {
-    if (s.machine_state !== 'Halted') {
-      const until = new Date(now.getTime() + HALT_DURATION_MS).toISOString();
-      state.setMachineState('Halted', until);
-      alert(`🔴 *HALTED*\nReason: \`${haltReason}\`\nCooldown until: ${until}`);
-    }
+    const until = new Date(now.getTime() + HALT_DURATION_MS).toISOString();
+    // Snapshot what tripped this halt (persisted by setMachineState below)
+    // so the same still-true level doesn't re-halt once the cooldown ends.
+    s.halt_trigger = { reason: haltReason, date: s.daily.date, trades: s.daily.trades };
+    state.setMachineState('Halted', until);
+    alert(`🔴 *HALTED*\nReason: \`${haltReason}\`\nCooldown until: ${until}`);
     return { state: 'Halted', reason: haltReason };
   }
 
-  // Check Slow triggers (only if not already Halted)
-  const slowReason = checkSlowTriggers(portfolio_usd);
+  // Daily profit target blocks NEW entries only (enforced in canOpenPosition).
+  // It deliberately does not enter Halted: that would tighten trailing stops
+  // on the very winners that hit the target. Alert once per UTC day.
+  notifyProfitTargetOnce(s);
+
+  // Check Slow triggers
+  const slowReason = checkSlowTriggers();
   if (slowReason) {
-    if (s.machine_state !== 'Slow' && s.machine_state !== 'Halted') {
+    if (s.machine_state !== 'Slow') {
       state.setMachineState('Slow');
       alert(`🟡 *SLOW MODE*\nReason: \`${slowReason}\``);
     }
@@ -64,35 +86,43 @@ export function evaluateState(portfolio_usd) {
   return { state: 'Normal' };
 }
 
-function checkHaltTriggers(portfolio_usd) {
+function checkHaltTriggers() {
   const s = state.loadState();
   const daily = s.daily;
 
-  // 3 losses in a row
-  if (daily.consecutive_losses >= 3) return 'three_consecutive_losses';
+  let reason = null;
+  if (daily.consecutive_losses >= 3) reason = 'three_consecutive_losses';            // 3 losses in a row
+  else if (dailyPnlPct(daily) <= -DAILY_LOSS_LIMIT_PCT) reason = 'daily_loss_limit';  // daily loss limit
+  if (!reason) return null;
 
-  // Daily loss limit
-  const dailyPnlPct = daily.starting_portfolio_usd > 0
-    ? (daily.realized_pnl_usd / daily.starting_portfolio_usd) * 100
-    : 0;
-  if (dailyPnlPct <= -DAILY_LOSS_LIMIT_PCT) return 'daily_loss_limit';
+  // A halt was already served today and no trade has closed since — the
+  // level is stale, not a new event.
+  const t = s.halt_trigger;
+  if (t && t.date === daily.date && t.trades === daily.trades) return null;
 
-  // Daily profit target (halts NEW entries only — existing positions OK)
-  if (dailyPnlPct >= DAILY_PROFIT_TARGET_PCT) return 'daily_profit_target';
-
-  return null;
+  return reason;
 }
 
-function checkSlowTriggers(_portfolio_usd) {
+function notifyProfitTargetOnce(s) {
+  const pct = dailyPnlPct(s.daily);
+  if (pct >= DAILY_PROFIT_TARGET_PCT && !s.daily.profit_target_alerted) {
+    s.daily.profit_target_alerted = true;   // reset naturally by daily rotation
+    state.saveState();
+    logger.info('daily_profit_target_hit', { daily_pnl_pct: pct });
+    alert(
+      `🎯 *DAILY PROFIT TARGET* ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%\n` +
+      `No new entries until UTC midnight. Open positions keep being managed.`
+    );
+  }
+}
+
+function checkSlowTriggers() {
   const s = state.loadState();
   const daily = s.daily;
 
   if (daily.losses >= 2) return 'two_losses_today';
 
-  const dailyPnlPct = daily.starting_portfolio_usd > 0
-    ? (daily.realized_pnl_usd / daily.starting_portfolio_usd) * 100
-    : 0;
-  if (dailyPnlPct <= -SLOW_TRIGGER_PNL_PCT) return 'half_daily_loss';
+  if (dailyPnlPct(daily) <= -SLOW_TRIGGER_PNL_PCT) return 'half_daily_loss';
 
   const eq = state.getRecentExitQuality(5);
   if (eq !== null && eq < 0.4) return 'low_exit_quality';
@@ -118,10 +148,7 @@ export function canOpenPosition(setupId) {
   }
 
   // Daily profit target → no new entries today
-  const dailyPnlPct = s.daily.starting_portfolio_usd > 0
-    ? (s.daily.realized_pnl_usd / s.daily.starting_portfolio_usd) * 100
-    : 0;
-  if (dailyPnlPct >= DAILY_PROFIT_TARGET_PCT) {
+  if (dailyPnlPct(s.daily) >= DAILY_PROFIT_TARGET_PCT) {
     return { allowed: false, reason: 'daily_profit_target_hit' };
   }
 
@@ -142,6 +169,17 @@ export function canOpenPosition(setupId) {
 
 // ─── Position sizing ───────────────────────────────────────────────────────
 
+// Entry cost basis still held across all open positions (scale-outs release
+// their share). This is what MAX_PORTFOLIO_USD caps.
+export function deployedCostBasisUsd() {
+  return state.getOpenPositions().reduce((acc, p) => {
+    const entryAmt = p.entry_amount_token || 0;
+    const curAmt = p.current_amount_token ?? entryAmt;
+    const frac = entryAmt > 0 ? Math.max(0, Math.min(1, curAmt / entryAmt)) : 1;
+    return acc + (p.entry_value_usd || 0) * frac;
+  }, 0);
+}
+
 // Returns USD size for a new position, or 0 if no capacity / disallowed.
 export function computePositionSize({
   portfolio_usd,
@@ -151,24 +189,32 @@ export function computePositionSize({
 }) {
   const s = state.loadState();
 
-  // Per-portfolio cap (25% per position default)
+  // Per-portfolio fraction (25% per position default, half in Slow)
   const baseFractionOfPortfolio = 0.25;
-  const slowFraction = 0.125;  // half in Slow
+  const slowFraction = 0.125;
   const fraction = s.machine_state === 'Slow' ? slowFraction : baseFractionOfPortfolio;
   let size = portfolio_usd * fraction;
+
+  // Booster: +25% in Normal mode only. Applied BEFORE the caps so a boosted
+  // entry can never exceed the per-token or global ceilings.
+  if (rs_boost && s.machine_state === 'Normal') {
+    size = size * 1.25;
+  }
 
   // Per-token cap
   const tokenCap = token_config.max_position_usd || 50;
   size = Math.min(size, tokenCap);
 
-  // Booster: +25% in Normal mode only
-  if (rs_boost && s.machine_state === 'Normal') {
-    size = size * 1.25;
-  }
-
   // Don't blow cash buffer (always keep ~25% cash)
   const maxFromCash = cash_usd * 0.75;
   size = Math.min(size, maxFromCash);
+
+  // Global deployment ceiling: MAX_PORTFOLIO_USD (.env). Cost basis held +
+  // this entry must stay under it. Unset / 0 = no global cap.
+  const maxDeploy = parseFloat(process.env.MAX_PORTFOLIO_USD || '0');
+  if (maxDeploy > 0) {
+    size = Math.min(size, maxDeploy - deployedCostBasisUsd());
+  }
 
   // Min trade
   const minSize = parseFloat(process.env.MIN_TRADE_SIZE_USD || '5');
@@ -221,6 +267,7 @@ export default {
   evaluateState,
   canOpenPosition,
   computePositionSize,
+  deployedCostBasisUsd,
   getTrailingStopPct,
   getHardStopPct,
   onPositionClosed,

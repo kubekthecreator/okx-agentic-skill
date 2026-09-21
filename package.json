@@ -1,13 +1,13 @@
 {
   "name": "okx-agentic-skill",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Trend-following trading skill for OKX Agentic Wallet Competition. AI-augmented, not AI-autonomous: enforces rules emotions break, exits on catalyst death, halts on losing streaks.",
   "main": "bot.js",
   "type": "module",
   "scripts": {
     "start": "node bot.js",
     "dev": "cross-env DRY_RUN=true node bot.js",
-    "test": "node --test test/",
+    "test": "node --test",
     "status": "node scripts/status.js"
   },
   "keywords": [

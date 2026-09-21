@@ -19,10 +19,26 @@ export function lastPrice(candles) {
   return candles[candles.length - 1].close;
 }
 
-// volumeSumLast(candles, n) returns total volume over the last n candles
-function volumeSumLast(candles, n) {
-  if (candles.length < n) return 0;
-  return candles.slice(-n).reduce((acc, c) => acc + c.volume_usd, 0);
+// Completed (closed) candles only.
+//
+// The newest hourly bar returned by the market API is the bar in progress:
+// one minute past the hour its volume is close to zero. Any volume-based
+// comparison that includes it is systematically biased (momentum fails early
+// in the hour, "volume collapse" fires right after the hour turns over).
+//
+// Candles carry `complete: true|false` when the source reports it. When the
+// flag is missing the newest bar is assumed to be in progress and dropped.
+export function completedCandles(candles) {
+  const n = candles.length;
+  if (n === 0) return [];
+  const last = candles[n - 1];
+  if (last.complete === true) return candles;
+  if (last.complete === false) {
+    let end = n;
+    while (end > 0 && candles[end - 1].complete === false) end--;
+    return candles.slice(0, end);
+  }
+  return candles.slice(0, n - 1);
 }
 
 // ─── Entry signals ─────────────────────────────────────────────────────────
@@ -42,11 +58,14 @@ export function signalTrend(candles) {
 }
 
 // Signal 2: Momentum — volume(1h) > 1.5 × avg(volume, 24h).
+// "1h" is the last COMPLETED hourly bar; the average is over the 24 completed
+// bars before it. Needs 25 completed candles.
 export function signalMomentum(candles, multiplier = 1.5) {
-  if (candles.length < 25) return { passed: false, reason: 'insufficient_data' };
-  const last1h_volume = candles[candles.length - 1].volume_usd;
-  const last24h_volume = volumeSumLast(candles, 24);
-  const avg24h_volume = last24h_volume / 24;
+  const closed = completedCandles(candles);
+  if (closed.length < 25) return { passed: false, reason: 'insufficient_data' };
+  const last1h_volume = closed[closed.length - 1].volume_usd;
+  const prior24 = closed.slice(-25, -1);
+  const avg24h_volume = prior24.reduce((acc, c) => acc + c.volume_usd, 0) / 24;
   if (avg24h_volume === 0) return { passed: false, reason: 'zero_volume' };
   const ratio = last1h_volume / avg24h_volume;
   return {
@@ -141,6 +160,18 @@ export function setupId(signals) {
   return `${types.join('+')}__${rs}`;
 }
 
+// The three chart-only hard signals (trend, momentum, valuation). Pure and
+// cheap — strategy.js runs this BEFORE paying for catalyst data, which costs
+// an extra CLI call per token per tick.
+export function evaluatePriceSignals(candles) {
+  const trend = signalTrend(candles);
+  const momentum = signalMomentum(candles);
+  const valuation = signalNotExtended(candles);
+  const breakdown = { trend, momentum, valuation };
+  const passed = trend.passed && momentum.passed && valuation.passed;
+  return { passed, breakdown, reason: passed ? null : firstFailure(breakdown) };
+}
+
 // Combined entry decision. Returns object with .passed and full breakdown.
 // In Slow mode, catalyst becomes mandatory AND smart_money type is required.
 export function evaluateEntry({
@@ -149,17 +180,14 @@ export function evaluateEntry({
   catalysts,
   machineState = 'Normal',
 }) {
-  const trend = signalTrend(candles);
-  const momentum = signalMomentum(candles);
-  const valuation = signalNotExtended(candles);
+  const price = evaluatePriceSignals(candles);
   const catalyst = signalCatalyst(catalysts);
   const rs = signalRelativeStrength(candles, refCandles);
 
-  const breakdown = { trend, momentum, valuation, catalyst, rs };
+  const breakdown = { ...price.breakdown, catalyst, rs };
 
   // All 4 hard signals must pass
-  const hardSignalsOk = trend.passed && momentum.passed && valuation.passed && catalyst.passed;
-  if (!hardSignalsOk) {
+  if (!price.passed || !catalyst.passed) {
     return { passed: false, breakdown, reason: firstFailure(breakdown) };
   }
 
@@ -189,11 +217,13 @@ function firstFailure(breakdown) {
 export default {
   sma,
   lastPrice,
+  completedCandles,
   signalTrend,
   signalMomentum,
   signalNotExtended,
   signalCatalyst,
   signalRelativeStrength,
+  evaluatePriceSignals,
   evaluateEntry,
   setupId,
 };
