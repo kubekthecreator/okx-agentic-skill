@@ -63,11 +63,15 @@ overtrading. None of these are clever. All of them require not feeling FOMO.
                 └─────────────────────────────────────┘
 ```
 
-Three concurrent monitoring loops run alongside the main flow:
+Background loops run alongside the main 60-second tick (which manages open
+positions first, then scans for entries):
 
-- **Every 60s** — peak unrealized PnL snapshot per position
-- **Every 5 min** — kill condition check per open position
-- **Every 30 min** — catalyst freshness check (smart money still in? news still alive?)
+- **Every 5 min** — independent exit sweep per open position (stops, time
+  stop, volume collapse, catalyst death), so a slow tick never delays an
+  exit by more than five minutes
+- **Every hour** — holder-count snapshot per whitelisted token; this builds
+  the 24h baseline behind the on-chain-spike catalyst
+- **Every minute (clock only)** — daily-summary rollover check
 
 ## Strategy completeness
 
@@ -98,8 +102,9 @@ wins:
 - *Kill conditions*: catalyst death, volume collapse, time stop (5 days)
 
 **Exit quality — measuring how well we sold.** After every close:
-`quality = exit_pnl / peak_pnl`. If 5-trade average drops below 40%, the bot
-recognises it's exiting too early and auto-widens trailing stops.
+`quality = exit_pnl / peak_pnl`. If the 5-trade average drops below 40%, the
+bot drops into Slow mode (smart-money catalyst required, half size, one
+position at a time) until the average recovers.
 
 ## Risk control framework
 
@@ -115,7 +120,6 @@ A three-tier state machine. Every entry passes through it.
 **Slow mode (🟡)** — Triggered by any of:
 - 2 losses today
 - Daily PnL < −1.5% (half of daily limit)
-- Last exit was chaotic (<5 min hold)
 - 5-trade exit quality average < 40%
 
 Behavior:
@@ -127,22 +131,27 @@ Behavior:
 **Halted (🔴)** — Triggered by any of:
 - 3 losses in a row
 - Daily PnL < −3% (full daily limit)
-- Daily profit > +5% (post-win discipline, halts new entries only)
-- Anti-pattern detector: 5 losses on same setup type
 
 Behavior:
 - No new positions for 4 hours
 - Open positions continue to be managed, with tightened trailing
 - Telegram alert dispatched with reason
 - After 4h cooldown → reverts to Slow mode (must earn way back to Normal)
+- A halt is served once per trigger: the same still-true condition does
+  not re-halt the bot until another trade closes (the triggers are levels,
+  the halt is an edge)
+
+The daily profit target (+5%) is *not* a Halted trigger: it blocks new
+entries until UTC midnight but leaves open winners on the normal 8% trail.
 
 ### Anti-pattern detector
 
 Every trade is logged with metadata: setup signals, entry/exit time, PnL,
-exit reason. A background analyser runs every 24h to find patterns:
+exit reason. On every close the bot checks the closed trade's setup type
+(`smart_money__rs`, `on_chain_spike__no_rs`, …):
 
-- 5 losses on the same setup type → that setup pauses for 24h
-- 3 losses in a row in same time-of-day window → that window pauses for 24h
+- ≥5 losses on the same setup type with a win rate under 30% → that setup
+  pauses for 24h (the bot itself keeps trading other setups)
 
 This is the bot detecting its own bad habits — the most expensive lesson in
 trading, automated.
@@ -175,14 +184,33 @@ change. On a JSON parse error the corrupted file is preserved as
 `state.json.corrupted-<ts>` before falling back to defaults — the user can
 inspect or recover. Process restart loses no information.
 
-**Pre-flight checks** before every swap:
+**Pre-flight checks** before every entry:
+- State machine permits a new position (not Halted, no post-win cooldown,
+  daily profit target not hit, setup not paused, concurrent limit)
+- Sizing leaves a 25% cash buffer and respects the per-token cap and
+  `MAX_PORTFOLIO_USD`
 - Sufficient SOL gas balance (min 0.003 SOL)
-- Quote slippage within tolerance (max 2%)
-- Token not in cooldown
-- State machine permits the action
-- Daily limit not breached
+- Quote price impact within tolerance (max 2%) — also checked on exits
 
 If any check fails, the trade is logged with rejection reason and skipped.
+
+**Closed candles only for volume.** The newest hourly bar from the market
+API is the bar in progress — a minute past the hour its volume is close to
+zero. Momentum (1h vs 24h volume) and the volume-collapse kill condition
+therefore use only completed bars (`confirm` flag from the API; when the
+flag is missing the newest bar is assumed in-progress). Price-based checks
+(trend, stops) use the live price.
+
+**Swaps are never retried.** Transient CLI errors are retried once for
+reads. `swap execute` is not idempotent — a timed-out call may already be
+on-chain — so it runs exactly once and any failure surfaces for the next
+tick to reconcile.
+
+**PnL accounting includes partial exits.** Each scale-out books its real
+proceeds against the entry cost of the fraction sold. The final close adds
+the residue, so a position scaled out at +15% and +30% and then stopped at
+−10% is recorded as the winner it actually was — and feeds the state
+machine as one.
 
 **Confirming responses are surfaced, not auto-forced.** When the OnchainOS
 CLI returns a confirming response (its backend wants a human in the loop),
@@ -215,8 +243,10 @@ that visible at every step.
 `printBanner()`. There is no interactive CONFIRM prompt; the gate is
 `DRY_RUN=true` in `.env` (the default).
 
-**Capital caps.** `MAX_PORTFOLIO_USD` in `.env` is a hard ceiling — bot will
-never deploy more than this even if wallet balance is higher. Default $200.
+**Capital caps.** `MAX_PORTFOLIO_USD` in `.env` is a hard ceiling on the
+entry cost basis held across all open positions — the bot will never deploy
+more than this even if the wallet balance is higher. Default $200; unset or
+`0` disables the global cap (per-token caps in `tokens.json` still apply).
 
 **Material decisions ping a human.** Any position > 15% of portfolio
 dispatches a Telegram alert before execution. *Note:* full veto polling
@@ -241,34 +271,18 @@ except OKX itself and your Telegram bot. No analytics, no telemetry.
 Every decision is logged. Logs are structured JSON, written to
 `logs/bot-YYYY-MM-DD.log` with daily rotation.
 
-**Per-tick log entry:**
+**Per-tick log entry** (plus one `signal_eval` line per token at
+`LOG_LEVEL=debug`):
 ```json
-{
-  "ts": "2026-05-15T12:34:56Z",
-  "tick": 1234,
-  "state": "Normal",
-  "portfolio_usd": 187.42,
-  "open_positions": 2,
-  "daily_pnl_pct": 1.8,
-  "decisions": [
-    {
-      "token": "JUP",
-      "action": "skip",
-      "reason": "catalyst_missing",
-      "signals": { "trend": true, "momentum": true, "valuation": true, "catalyst": false }
-    }
-  ]
-}
+{"ts":"2026-05-15T12:34:56Z","level":"info","msg":"tick","tick":1234,"state":"Normal","portfolio_usd":"187.42","cash_usd":"92.10","open_positions":2,"daily_pnl_usd":"3.37","daily_trades":1}
+{"ts":"2026-05-15T12:34:58Z","level":"debug","msg":"signal_eval","token":"JUP","passed":false,"reason":"momentum_failed"}
 ```
 
 **Per-trade log entry** includes entry signals, kill conditions assigned,
 exit reason, peak PnL during hold, exit quality, and full PnL accounting.
 
-**Daily summary** sent to Telegram at 00:00 UTC:
-- Trades count, win rate, PnL
-- Exit quality average
-- State machine transitions
-- Setup type performance (which signal combinations made/lost money)
+**Daily summary** sent to Telegram on the first tick after UTC midnight:
+trade count, win/loss split, realized PnL, current machine state.
 
 **Status command.** `npm run status` prints the live state to console:
 current portfolio, open positions with PnL, state machine status, today's
@@ -321,6 +335,17 @@ blue-chip SPL tokens cleared all four hard signals simultaneously
 breakdown below). The bot did exactly what a disciplined trend-follower
 should: it waited.
 
+**What that run could not prove.** With zero trades, nothing downstream of
+an entry was exercised in production. A September 2026 code audit found
+and fixed defects on exactly that path (v0.2): momentum was measured on
+the in-progress hourly bar (biased toward `momentum_failed`), the
+volume-collapse kill condition would have fired at the first hour
+boundary after any entry, the on-chain holder-growth catalyst could never
+establish its 24h baseline, partial exits were not included in realized
+PnL, halts re-triggered every 4h instead of dropping to Slow, and
+`MAX_PORTFOLIO_USD` was documented but unenforced. The commit history
+carries the details; the test suite (`npm test`) now covers each one.
+
 ### Honest notes on the run
 
 - **Day-1 deployment teething.** `bot-2026-05-19.log` contains 10
@@ -333,10 +358,10 @@ should: it waited.
   bind-mounting `state.json` as a single file blocks the atomic
   temp+rename write. The error is caught (`saveState` try/catch) and
   non-fatal — in-memory state stayed consistent for the full 90h, which
-  is why daily summaries kept firing correctly across the run. The fix
-  (mount the data *directory*, not individual files) is tracked; it only
-  affects state durability across container *recreation*, not running
-  operation.
+  is why daily summaries kept firing correctly across the run. Fixed since
+  (the compose file now mounts the data *directory*, not individual files);
+  it only ever affected state durability across container *recreation*,
+  not running operation.
 
 ### Local dry-run detail — 18 May 2026
 
@@ -588,9 +613,6 @@ Competition (7–21 May 2026)** but designed to function before and after.
 - Never exports the wallet (which would disqualify the participant).
 - Never executes washes, hedges on external platforms, or other
   rule-circumventing maneuvers (which would also disqualify).
-- Volume target awareness: bot prioritizes setups that build toward the
-  $1000 volume threshold for leaderboard qualification, while never taking
-  a trade purely for volume (which would lose money).
 
 ## Roadmap (post-competition)
 
@@ -604,7 +626,13 @@ Things deliberately not in v0.1 to keep scope realistic for the
   yet implemented here. Solana-only for now.
 - **Backtest harness.** A simulator that replays historical OKX market
   data against the strategy. Critical for parameter tuning beyond the
-  competition.
+  competition — in particular the volume-collapse threshold (70% below
+  the entry bar's volume is easy to hit on a quiet hour).
+- **Telegram STOP polling.** `alertWithVeto` notifies but cannot yet read
+  a reply; material entries proceed after the alert.
+- **Chaotic-exit and time-of-day detectors.** Slow trigger on <5-minute
+  holds and the time-of-day anti-pattern window are specified but not
+  implemented.
 - **Web dashboard.** Read-only view of positions, PnL, state machine,
   decision log. Currently CLI + Telegram only.
 - **Strategy variants.** Mean-reversion mode, mem-sniper mode (with
