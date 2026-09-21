@@ -70,7 +70,7 @@ sudo chown okxbot:okxbot /opt/okx-bot
 
 sudo -u okxbot git clone https://github.com/kubekthecreator/okx-agentic-skill /opt/okx-bot
 cd /opt/okx-bot
-sudo -u okxbot npm ci --omit=dev
+sudo -u okxbot npm install --omit=dev   # no lockfile is committed, so `npm ci` would refuse to run
 ```
 
 ### 2. Configure `.env`
@@ -110,7 +110,7 @@ sudo systemctl enable --now okx-bot
 ```bash
 sudo systemctl status okx-bot
 sudo journalctl -u okx-bot -f         # follow logs (Ctrl-C to stop tailing)
-sudo -u okxbot /opt/okx-bot/scripts/status.js  # live snapshot via the bundled status command
+(cd /opt/okx-bot && sudo -u okxbot npm run status)   # live snapshot
 ```
 
 You should see (within ~5s of start):
@@ -188,7 +188,7 @@ fast-forward update is safe:
 ```bash
 sudo systemctl stop okx-bot
 sudo -u okxbot git -C /opt/okx-bot pull --ff-only
-sudo -u okxbot npm --prefix /opt/okx-bot ci --omit=dev
+sudo -u okxbot npm --prefix /opt/okx-bot install --omit=dev
 sudo systemctl start okx-bot
 sudo journalctl -u okx-bot -f
 ```
