@@ -350,3 +350,187 @@ export async function weeklyHeartbeat({ portfolio_usd, week, funnel }) {
     { silent: true }
   );
 }
+
+// ─── Lifecycle ─────────────────────────────────────────────────────────────
+
+export async function started({ portfolio_usd, open_positions }) {
+  await send(
+    `🚀 <b>okx-bot started</b> · ${modeLabel()}\n` +
+    `Portfolio ${fmtUsd(portfolio_usd)} · open positions ${open_positions}`,
+    { silent: true }
+  );
+}
+
+export async function stopped({ signal, open_positions }) {
+  if (open_positions > 0) {
+    await send(
+      `⏹️ <b>okx-bot stopped</b> (${esc(signal)})\n` +
+      `⚠️ ${open_positions} open position${open_positions === 1 ? '' : 's'} — stops are NOT enforced until it runs again.`
+    );
+    return;
+  }
+  await send(`⏹️ <b>okx-bot stopped</b> (${esc(signal)}) · no open positions`, { silent: true });
+}
+
+export async function crashed(message) {
+  await send(
+    `🚨 <b>okx-bot crashed</b> — restarting\n<code>${esc(clip(message))}</code>`,
+    { key: `crash:${clip(message, 100)}`, everyMs: HOUR }
+  );
+}
+
+export async function unhandled(message) {
+  await send(
+    `🚨 <b>Unhandled error</b> (the bot keeps running)\n<code>${esc(clip(message))}</code>`,
+    { key: `unhandled:${clip(message, 100)}`, everyMs: HOUR }
+  );
+}
+
+// id: stable per failure kind (cli_not_logged_in, cli_unrunnable,
+// balance_unreadable, startup_crash) so a crash loop repeats at most every 6h.
+export async function cannotStart(id, reason, hint) {
+  await send(
+    `🚨 <b>okx-bot DOWN</b> — can't start: ${esc(clip(reason))}\n` +
+    `Docker keeps restarting it; nothing is traded or managed.\n` +
+    `Fix: ${esc(hint)}\n` +
+    `<i>Repeats at most every 6h while it keeps failing.</i>`,
+    { key: `cannot_start:${id}`, everyMs: 6 * HOUR }
+  );
+}
+
+// ─── Trades ────────────────────────────────────────────────────────────────
+
+export async function buy({ symbol, size_usd, pct_of_portfolio, entry_price_usd, setup_id,
+  hard_stop_pct, trailing_pct, scale_out_pcts, tx_id }) {
+  const stopPrice = entry_price_usd * (1 - hard_stop_pct / 100);
+  await send(
+    `🟢 <b>BUY ${esc(symbol)}</b> ${fmtUsd(size_usd)} (${pct_of_portfolio.toFixed(0)}% of portfolio)${dryTag()}\n` +
+    `Entry ${fmtPrice(entry_price_usd)} · setup: ${esc(humanSetup(setup_id))}\n` +
+    `Exits: stop ${fmtPrice(stopPrice)} (−${hard_stop_pct}%) · trail ${trailing_pct}% · ` +
+    `scale-outs at ${scale_out_pcts.map(p => `+${p}%`).join('/')}` +
+    txLine(tx_id)
+  );
+}
+
+export async function buyBlocked({ symbol, message, next }) {
+  await send(
+    `🟡 <b>BUY ${esc(symbol)} blocked</b> — OKX wants a manual confirmation\n` +
+    `${esc(clip(message))}\n` +
+    `CLI next step: <code>${esc(clip(next || 'see CLI output'))}</code>\n` +
+    `The bot will not force it. <i>Repeats at most every 6h.</i>`,
+    { key: `buy_blocked:${symbol}`, everyMs: 6 * HOUR }
+  );
+}
+
+export async function untracked({ symbol, tx_id }) {
+  await send(
+    `🚨 <b>BUY ${esc(symbol)} NOT tracked</b>${dryTag()} — the swap fired but the entry price is unknown\n` +
+    `The bot will NOT manage stops for it. Close it manually via the CLI.` +
+    txLine(tx_id)
+  );
+}
+
+export async function scaleOut({ symbol, level_pct, fraction, proceeds_usd, booked_usd }) {
+  await send(
+    `📤 <b>SCALE-OUT ${esc(symbol)}</b> at +${level_pct}%${dryTag()}\n` +
+    `Sold ${(fraction * 100).toFixed(0)}% for ${fmtUsd(proceeds_usd)} · booked ${fmtSigned(booked_usd, '$')}`,
+    { silent: true }
+  );
+}
+
+// day: state.daily right after this close (today's running totals).
+// close: risk.onPositionClosed()'s return — { cooldown_until, setup_halt }.
+export async function exit({ symbol, realized_pnl_pct, realized_pnl_usd, reason, peak_pnl_pct,
+  exit_quality, hold_ms, day, close = {} }) {
+  const lines = [
+    `${realized_pnl_usd > 0 ? '✅' : '❌'} <b>EXIT ${esc(symbol)}</b> ` +
+      `${fmtSigned(realized_pnl_pct, '', '%')} (${fmtSigned(realized_pnl_usd, '$')})${dryTag()}`,
+    `Why: ${esc(humanReason(reason))} · peak ${fmtSigned(peak_pnl_pct, '', '%')}`,
+    `Held ${fmtDuration(hold_ms)}` +
+      (exit_quality != null ? ` · kept ${(exit_quality * 100).toFixed(0)}% of peak gain` : ''),
+    `Today: ${fmtSigned(day.realized_pnl_usd, '$')} (${day.wins}W / ${day.losses}L)`,
+  ];
+  if (close.cooldown_until) {
+    lines.push(`⏸ No new entries until ${fmtTime(close.cooldown_until)} (post-win cooldown)`);
+  }
+  if (close.setup_halt) {
+    const h = close.setup_halt;
+    lines.push(`⛔ Setup ${esc(humanSetup(h.setup_id))} paused until ${fmtTime(h.until)} — ${h.wins}/${h.trades} wins`);
+  }
+  await send(lines.join('\n'));
+}
+
+export async function exitBlocked({ position_id, symbol, reason, message, next }) {
+  await send(
+    `🚨 <b>EXIT ${esc(symbol)} blocked</b> — OKX wants a manual confirmation\n` +
+    `Exit reason: ${esc(humanReason(reason))}\n` +
+    `${esc(clip(message))}\n` +
+    `CLI next step: <code>${esc(clip(next || 'see CLI output'))}</code>\n` +
+    `The position is still open; the bot retries about every 10 min. <i>Reminder at most hourly.</i>`,
+    { key: `exit_blocked:${position_id}`, everyMs: HOUR }
+  );
+}
+
+export async function exitFailing({ position_id, symbol, reason, pnl_pct, error }) {
+  await send(
+    `🚨 <b>EXIT ${esc(symbol)} failing</b> at ${fmtSigned(pnl_pct, '', '%')}${dryTag()}\n` +
+    `Exit reason: ${esc(humanReason(reason))}\n` +
+    `Error: <code>${esc(clip(error))}</code>\n` +
+    `The position is still open; the bot retries every tick. <i>Reminder at most hourly.</i>`,
+    { key: `exit_failing:${position_id}`, everyMs: HOUR }
+  );
+}
+
+// ─── Risk state ────────────────────────────────────────────────────────────
+
+export async function halted({ reason, until, trailing_pct }) {
+  await send(
+    `🔴 <b>HALTED</b> — ${esc(humanReason(reason))}\n` +
+    `No new entries until ${fmtTime(until)}. Open positions stay managed on a tighter ${trailing_pct}% trail; ` +
+    `after that the bot resumes in Slow mode.`
+  );
+}
+
+export async function slow({ reason }) {
+  await send(
+    `🟡 <b>SLOW mode</b> — ${esc(humanReason(reason))} (smaller positions, tighter stops)`,
+    { silent: true }
+  );
+}
+
+export async function normal() {
+  await send('🟢 <b>Back to NORMAL</b> — standard sizing and stops', { silent: true });
+}
+
+export async function profitTarget({ pct }) {
+  const nextUtcMidnight = new Date();
+  nextUtcMidnight.setUTCHours(24, 0, 0, 0);
+  await send(
+    `🎯 <b>Daily profit target hit</b> ${fmtSigned(pct, '', '%')}\n` +
+    `No new entries until ${fmtTime(nextUtcMidnight)}; open positions keep running.`,
+    { silent: true }
+  );
+}
+
+export default {
+  send,
+  tickResult,
+  dailyReport,
+  weeklyHeartbeat,
+  started,
+  stopped,
+  crashed,
+  unhandled,
+  cannotStart,
+  buy,
+  buyBlocked,
+  untracked,
+  scaleOut,
+  exit,
+  exitBlocked,
+  exitFailing,
+  halted,
+  slow,
+  normal,
+  profitTarget,
+};

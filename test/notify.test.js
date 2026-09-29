@@ -475,3 +475,171 @@ test('send reports whether the alert was handled', async () => {
     process.env.TELEGRAM_BOT_TOKEN = token;
   }
 });
+
+// ─── Lifecycle ────────────────────────────────────────────────────────────
+
+test('started is silent; stopped is silent when flat and loud with open positions', async () => {
+  await notify.started({ portfolio_usd: 9.68, open_positions: 0 });
+  await notify.stopped({ signal: 'SIGTERM', open_positions: 0 });
+  await notify.stopped({ signal: 'SIGTERM', open_positions: 2 });
+  assert.deepEqual(calls.map(c => c.body.disable_notification), [true, true, false]);
+  assert.match(calls[0].body.text, /okx-bot started<\/b> · DRY RUN\nPortfolio \$9\.68 · open positions 0/);
+  assert.match(calls[2].body.text, /2 open positions — stops are NOT enforced until it runs again/);
+});
+
+test('cannotStart is loud and repeats at most every 6h, even across restarts', async () => {
+  await notify.cannotStart('cli_not_logged_in', 'the onchainos CLI is not logged in', 're-login');
+  await notify.cannotStart('cli_not_logged_in', 'the onchainos CLI is not logged in', 're-login');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.disable_notification, false);
+  assert.match(calls[0].body.text, /okx-bot DOWN<\/b> — can't start: the onchainos CLI is not logged in/);
+  assert.match(calls[0].body.text, /Fix: re-login/);
+  const saved = JSON.parse(fs.readFileSync(sentFile, 'utf-8'));
+  assert.equal(typeof saved['cannot_start:cli_not_logged_in'], 'number', 'persisted for the next process');
+});
+
+test('crashed and unhandled are loud and throttled per message', async () => {
+  await notify.crashed('boom');
+  await notify.crashed('boom');
+  await notify.unhandled('oops');
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].body.text, /crashed<\/b> — restarting\n<code>boom<\/code>/);
+  assert.equal(calls[1].body.disable_notification, false);
+});
+
+// ─── Trades ───────────────────────────────────────────────────────────────
+
+test('buy: size, share of portfolio, readable price, setup and exit plan; DRY run shows no tx', async () => {
+  await notify.buy({
+    symbol: 'BONK', size_usd: 12.4, pct_of_portfolio: 25, entry_price_usd: 0.0000213456,
+    setup_id: 'smart_money__rs', hard_stop_pct: 10, trailing_pct: 8, scale_out_pcts: [15, 30, 50],
+    tx_id: 'dry-entry-123',
+  });
+  const { text, disable_notification } = calls[0].body;
+  assert.equal(disable_notification, false);
+  assert.match(text, /BUY BONK<\/b> \$12\.40 \(25% of portfolio\) · DRY/);
+  assert.match(text, /Entry \$0\.00002135 · setup: smart money · RS boost/);
+  assert.match(text, /stop \$0\.00001921 \(−10%\) · trail 8% · scale-outs at \+15%\/\+30%\/\+50%/);
+  assert.doesNotMatch(text, /Solscan|tx:/);
+});
+
+test('buy: LIVE links a Solana signature to Solscan and drops the DRY tag', async () => {
+  process.env.DRY_RUN = 'false';
+  try {
+    const sig = '5'.repeat(88);
+    await notify.buy({
+      symbol: 'JUP', size_usd: 20, pct_of_portfolio: 20, entry_price_usd: 0.41,
+      setup_id: 'smart_money__no_rs', hard_stop_pct: 10, trailing_pct: 8, scale_out_pcts: [15, 30, 50],
+      tx_id: sig,
+    });
+    assert.match(calls[0].body.text, new RegExp(`<a href="https://solscan\\.io/tx/${sig}">`));
+    assert.doesNotMatch(calls[0].body.text, /DRY/);
+  } finally {
+    process.env.DRY_RUN = 'true';
+  }
+});
+
+test('buy: LIVE with a non-signature tx id (order id) shows it as code, not a link', async () => {
+  process.env.DRY_RUN = 'false';
+  try {
+    await notify.buy({
+      symbol: 'JUP', size_usd: 20, pct_of_portfolio: 20, entry_price_usd: 0.41,
+      setup_id: 'smart_money__no_rs', hard_stop_pct: 10, trailing_pct: 8, scale_out_pcts: [15, 30, 50],
+      tx_id: 'order-123',
+    });
+    assert.match(calls[0].body.text, /\ntx: <code>order-123<\/code>$/);
+    assert.doesNotMatch(calls[0].body.text, /Solscan/);
+  } finally {
+    process.env.DRY_RUN = 'true';
+  }
+});
+
+test('buyBlocked is throttled per token for 6h and escapes CLI text', async () => {
+  await notify.buyBlocked({ symbol: 'JUP', message: 'use <force> & retry_now_', next: 'a_b*c' });
+  await notify.buyBlocked({ symbol: 'JUP', message: 'use <force> & retry_now_', next: 'a_b*c' });
+  await notify.buyBlocked({ symbol: 'WIF', message: 'risk warning', next: null });
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].body.text, /use &lt;force&gt; &amp; retry_now_/);
+  assert.match(calls[1].body.text, /CLI next step: <code>see CLI output<\/code>/);
+});
+
+test('untracked is loud', async () => {
+  await notify.untracked({ symbol: 'JUP', tx_id: 'dry-entry-1' });
+  assert.equal(calls[0].body.disable_notification, false);
+  assert.match(calls[0].body.text, /BUY JUP NOT tracked<\/b> · DRY/);
+});
+
+test('scaleOut is silent', async () => {
+  await notify.scaleOut({ symbol: 'JUP', level_pct: 15, fraction: 0.2, proceeds_usd: 2.84, booked_usd: 0.37 });
+  assert.equal(calls[0].body.disable_notification, true);
+  assert.match(calls[0].body.text, /SCALE-OUT JUP<\/b> at \+15% · DRY\nSold 20% for \$2\.84 · booked \+\$0\.37/);
+});
+
+test('exit: PnL, reason in words, hold time, today and close notes in ONE message', async () => {
+  await notify.exit({
+    symbol: 'JUP', realized_pnl_pct: 12.4, realized_pnl_usd: 1.54, reason: 'trailing_stop_8pct',
+    peak_pnl_pct: 20.1, exit_quality: 0.617, hold_ms: 30 * 3600_000,
+    day: { realized_pnl_usd: 1.54, wins: 1, losses: 0 },
+    close: {
+      cooldown_until: '2026-09-30T21:40:00Z',
+      setup_halt: { setup_id: 'smart_money__rs', until: '2026-10-01T19:40:00Z', wins: 1, trades: 6 },
+    },
+  });
+  assert.equal(calls.length, 1, 'one message, not three');
+  const { text, disable_notification } = calls[0].body;
+  assert.equal(disable_notification, false);
+  assert.match(text, /✅ <b>EXIT JUP<\/b> \+12\.40% \(\+\$1\.54\) · DRY/);
+  assert.match(text, /Why: trailing stop \(−8% from peak\) · peak \+20\.10%/);
+  assert.match(text, /Held 1d 6h · kept 62% of peak gain/);
+  assert.match(text, /Today: \+\$1\.54 \(1W \/ 0L\)/);
+  assert.match(text, /No new entries until .+ \(post-win cooldown\)/);
+  assert.match(text, /Setup smart money · RS boost paused until .+ — 1\/6 wins/);
+});
+
+test('exit: a loss without a peak omits exit quality and notes', async () => {
+  await notify.exit({
+    symbol: 'WIF', realized_pnl_pct: -10.3, realized_pnl_usd: -2.06, reason: 'hard_stop',
+    peak_pnl_pct: 0, exit_quality: null, hold_ms: 2 * 3600_000,
+    day: { realized_pnl_usd: -2.06, wins: 0, losses: 1 },
+    close: { cooldown_until: null, setup_halt: null },
+  });
+  const { text } = calls[0].body;
+  assert.match(text, /❌ <b>EXIT WIF<\/b> −10\.30% \(−\$2\.06\)/);
+  assert.match(text, /Why: hard stop/);
+  assert.doesNotMatch(text, /kept|cooldown|paused/);
+});
+
+test('exitBlocked and exitFailing are loud and throttled per position', async () => {
+  const blocked = { position_id: 'p1', symbol: 'JUP', reason: 'hard_stop', message: 'risk warning 81362', next: 'onchainos swap execute --force' };
+  await notify.exitBlocked(blocked);
+  await notify.exitBlocked(blocked);
+  await notify.exitFailing({ position_id: 'p1', symbol: 'JUP', reason: 'hard_stop', pnl_pct: -10.3, error: 'slippage_too_high:3.1' });
+  await notify.exitFailing({ position_id: 'p1', symbol: 'JUP', reason: 'hard_stop', pnl_pct: -10.4, error: 'slippage_too_high:3.2' });
+  await notify.exitFailing({ position_id: 'p2', symbol: 'WIF', reason: 'hard_stop', pnl_pct: -11, error: 'x' });
+  assert.equal(calls.length, 3, 'one per kind per position within the hour');
+  assert.ok(calls.every(c => c.body.disable_notification === false));
+  assert.match(calls[0].body.text, /EXIT JUP blocked<\/b> — OKX wants a manual confirmation/);
+  assert.match(calls[1].body.text, /EXIT JUP failing<\/b> at −10\.30% · DRY\nExit reason: hard stop\nError: <code>slippage_too_high:3\.1<\/code>/);
+});
+
+// ─── Risk state ───────────────────────────────────────────────────────────
+
+test('halted is loud with the reason in words; slow, normal and profit target are silent', async () => {
+  await notify.halted({ reason: 'three_consecutive_losses', until: '2026-09-30T02:15:00Z', trailing_pct: 5 });
+  await notify.slow({ reason: 'two_losses_today' });
+  await notify.normal();
+  await notify.profitTarget({ pct: 5.2 });
+  assert.deepEqual(calls.map(c => c.body.disable_notification), [false, true, true, true]);
+  assert.match(calls[0].body.text, /HALTED<\/b> — 3 losses in a row\nNo new entries until .+ tighter 5% trail/);
+  assert.match(calls[1].body.text, /SLOW mode<\/b> — 2 losses today/);
+  assert.match(calls[2].body.text, /Back to NORMAL/);
+  assert.match(calls[3].body.text, /Daily profit target hit<\/b> \+5\.20%/);
+});
+
+test('the default export exposes the whole catalog', () => {
+  for (const name of ['send', 'tickResult', 'dailyReport', 'weeklyHeartbeat', 'started', 'stopped',
+    'crashed', 'unhandled', 'cannotStart', 'buy', 'buyBlocked', 'untracked', 'scaleOut', 'exit',
+    'exitBlocked', 'exitFailing', 'halted', 'slow', 'normal', 'profitTarget']) {
+    assert.equal(typeof notify.default[name], 'function', name);
+  }
+});
