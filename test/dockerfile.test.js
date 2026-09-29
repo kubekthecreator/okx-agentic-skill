@@ -6,11 +6,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 
+const root = new URL('..', import.meta.url);
+
 test('deploy/Dockerfile copies every root-level module', () => {
-  const dockerfile = fs.readFileSync('deploy/Dockerfile', 'utf-8');
+  const dockerfile = fs.readFileSync(new URL('deploy/Dockerfile', root), 'utf-8');
   const copyLine = dockerfile.split('\n').find(l => l.startsWith('COPY') && l.includes('bot.js'));
   assert.ok(copyLine, 'COPY line with bot.js not found');
-  const modules = fs.readdirSync('.').filter(f => f.endsWith('.js'));
+  const modules = fs.readdirSync(root).filter(f => f.endsWith('.js'));
   for (const m of modules) {
     assert.ok(copyLine.split(/\s+/).includes(m), `${m} missing from the deploy/Dockerfile COPY line`);
   }

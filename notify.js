@@ -3,8 +3,9 @@
 // To know what can land on your phone, read this file top to bottom.
 //
 // Tiers:
-//   loud   — act now: can't start, crashed, blind, exit blocked/failing,
-//            untracked position, HALTED, stopped with open positions
+//   loud   — act now: can't start, crashed, unhandled error, blind,
+//            exit blocked/failing, untracked position, HALTED,
+//            stopped with open positions
 //   normal — trades: BUY, EXIT, BUY blocked
 //   silent — FYI, no sound: started, stopped flat, recovered, scale-out,
 //            SLOW, back to NORMAL, profit target, daily report, weekly heartbeat
@@ -31,8 +32,8 @@ export function esc(v) {
 }
 
 export function clip(v, n = MAX_DYNAMIC_CHARS) {
-  const s = String(v ?? '');
-  return s.length > n ? s.slice(0, n - 1) + '…' : s;
+  const chars = Array.from(String(v ?? ''));   // code points: never split an emoji
+  return chars.length > n ? chars.slice(0, n - 1).join('') + '…' : chars.join('');
 }
 
 // "29 Sept, 23:40 CEST" in the process time zone — set TZ (e.g.
@@ -44,6 +45,7 @@ export function fmtTime(ts) {
 }
 
 export function fmtDuration(ms) {
+  if (!Number.isFinite(ms)) return 'n/a';
   const m = Math.max(0, Math.round(ms / 60_000));
   if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);
@@ -59,16 +61,19 @@ export function fmtPrice(usd) {
 }
 
 export function fmtUsd(v) {
-  return '$' + v.toFixed(2);
+  return Number.isFinite(v) ? '$' + v.toFixed(2) : 'n/a';
 }
 
+// The sign follows the rounded value, so −0.004 reads "0.00", not "−0.00".
 export function fmtSigned(v, prefix = '', suffix = '') {
-  const sign = v > 0 ? '+' : v < 0 ? '−' : '';
-  return `${sign}${prefix}${Math.abs(v).toFixed(2)}${suffix}`;
+  if (!Number.isFinite(v)) return 'n/a';
+  const abs = Math.abs(v).toFixed(2);
+  const sign = abs === '0.00' ? '' : v > 0 ? '+' : '−';
+  return `${sign}${prefix}${abs}${suffix}`;
 }
 
 export function fmtInt(n) {
-  return n.toLocaleString('en-US');
+  return Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : 'n/a';
 }
 
 const REASONS = {
@@ -83,7 +88,7 @@ const REASONS = {
 };
 
 export function humanReason(code) {
-  if (REASONS[code]) return REASONS[code];
+  if (Object.hasOwn(REASONS, code)) return REASONS[code];
   let m;
   if ((m = /^trailing_stop_(\d+)pct$/.exec(code))) return `trailing stop (−${m[1]}% from peak)`;
   if ((m = /^volume_collapse_(\d+)pct$/.exec(code))) return `volume collapsed ${m[1]}% vs entry bar`;
@@ -118,18 +123,32 @@ function sentFile() {
   return path.join(dir, 'alerts_sent.json');
 }
 
-// True when `key` was sent less than `everyMs` ago (→ suppress); otherwise
-// records this send. A missing or corrupt file counts as empty: worst case
-// one duplicate alert, never a lost one.
-function throttled(key, everyMs, now = Date.now()) {
-  let sent = {};
+function readSent() {
   try {
-    sent = JSON.parse(fs.readFileSync(sentFile(), 'utf-8')) || {};
-  } catch { /* first run or corrupt file */ }
-  if (typeof sent[key] === 'number' && now - sent[key] < everyMs) return true;
+    const sent = JSON.parse(fs.readFileSync(sentFile(), 'utf-8'));
+    // Anything but a plain object (hand-edited, truncated…) counts as empty.
+    return sent && typeof sent === 'object' && !Array.isArray(sent) ? sent : {};
+  } catch {
+    return {};   // first run or corrupt file
+  }
+}
+
+// True when `key` was delivered less than `everyMs` ago. A timestamp in the
+// future (clock stepped back) doesn't count, so it can't mute alerts.
+function isThrottled(key, everyMs, now = Date.now()) {
+  const at = readSent()[key];
+  return typeof at === 'number' && at <= now && now - at < everyMs;
+}
+
+// Called only after Telegram accepted the message: a failed delivery must
+// not use up the slot, or DNS being down right after a VPS reboot would
+// mute exactly the alerts this exists for. Worst case: one duplicate.
+function markSent(key, now = Date.now()) {
+  const sent = readSent();
   sent[key] = now;
   for (const k of Object.keys(sent)) {
-    if (!(now - sent[k] < THROTTLE_KEEP_MS)) delete sent[k];
+    const age = now - sent[k];
+    if (!(age >= 0 && age < THROTTLE_KEEP_MS)) delete sent[k];
   }
   try {
     fs.mkdirSync(path.dirname(sentFile()), { recursive: true });
@@ -137,7 +156,6 @@ function throttled(key, everyMs, now = Date.now()) {
   } catch (err) {
     logger.warn('alerts_sent_write_failed', { error: err.message });
   }
-  return false;
 }
 
 // Returns the HTTP status, or null on timeout / network error.
@@ -170,6 +188,7 @@ async function post(token, body) {
 
 function toPlainText(html) {
   return html
+    .replace(/<a href="([^"]*)">([^<]*)<\/a>/g, '$2 ($1)')
     .replace(/<[^>]+>/g, '')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
@@ -177,9 +196,10 @@ function toPlainText(html) {
 }
 
 // Never throws: alert delivery must not affect trading decisions.
-export async function send(html, { silent = false, key = null, everyMs = 0 } = {}) {
+export async function send(html, opts) {
   try {
-    if (key && throttled(key, everyMs)) {
+    const { silent = false, key = null, everyMs = 0 } = opts ?? {};
+    if (key && isThrottled(key, everyMs)) {
       logger.info('alert_throttled', { key });
       return;
     }
@@ -189,13 +209,14 @@ export async function send(html, { silent = false, key = null, everyMs = 0 } = {
     const chat = process.env.TELEGRAM_CHAT_ID;
     if (!token || !chat) return;
 
-    const status = await post(token, {
+    let status = await post(token, {
       chat_id: chat, text: html, parse_mode: 'HTML', disable_notification: silent,
     });
     if (status === 400) {
       // Markup rejected → the same content as plain text rather than nothing.
-      await post(token, { chat_id: chat, text: toPlainText(html), disable_notification: silent });
+      status = await post(token, { chat_id: chat, text: toPlainText(html), disable_notification: silent });
     }
+    if (key && status === 200) markSent(key);
   } catch (err) {
     logger.warn('alert_failed', { error: err.message });
   }

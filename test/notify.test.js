@@ -1,7 +1,7 @@
 // notify.js — every Telegram message, tested against a stubbed fetch.
 // Run: npm test
 
-import { test, before, beforeEach } from 'node:test';
+import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import os from 'os';
@@ -19,7 +19,7 @@ before(async () => {
   process.env.DRY_RUN = 'true';
   sentFile = path.join(dir, 'logs', 'alerts_sent.json');
   globalThis.fetch = async (url, opts) => {
-    calls.push({ url, body: JSON.parse(opts.body) });
+    calls.push({ url, body: JSON.parse(opts.body), signal: opts.signal });
     const status = nextStatuses.shift() ?? 200;
     return {
       ok: status === 200,
@@ -33,6 +33,8 @@ before(async () => {
   setLogLevel('error');
   notify = await import('../notify.js');
 });
+
+after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 beforeEach(() => {
   calls.length = 0;
@@ -97,6 +99,29 @@ test('humanSetup reads setup ids', () => {
   assert.equal(notify.humanSetup('smart_money__no_rs'), 'smart money');
 });
 
+test('formatters return n/a instead of throwing on missing numbers', () => {
+  assert.equal(notify.fmtUsd(undefined), 'n/a');
+  assert.equal(notify.fmtSigned(NaN, '$'), 'n/a');
+  assert.equal(notify.fmtInt(undefined), 'n/a');
+  assert.equal(notify.fmtDuration(NaN), 'n/a');
+});
+
+test('fmtSigned drops the sign when the value rounds to zero; fmtInt rounds', () => {
+  assert.equal(notify.fmtSigned(-0.004, '$'), '$0.00');
+  assert.equal(notify.fmtSigned(0.004, '', '%'), '0.00%');
+  assert.equal(notify.fmtInt(1234.5678), '1,235');
+});
+
+test('clip never splits an emoji in half', () => {
+  const s = notify.clip('x'.repeat(298) + '😀😀😀');
+  assert.ok(s.isWellFormed());
+  assert.ok(s.endsWith('😀…'));
+});
+
+test('humanReason ignores inherited object keys', () => {
+  assert.equal(notify.humanReason('toString'), 'toString');
+});
+
 // ─── Transport ────────────────────────────────────────────────────────────
 
 test('send posts HTML; silent maps to disable_notification', async () => {
@@ -108,6 +133,7 @@ test('send posts HTML; silent maps to disable_notification', async () => {
     chat_id: '42', text: '<b>hi</b>', parse_mode: 'HTML', disable_notification: true,
   });
   assert.equal(calls[1].body.disable_notification, false);
+  assert.ok(calls[0].signal instanceof AbortSignal, 'fetch is abortable (5 s timeout)');
 });
 
 test('a 400 (markup rejected) is retried once as plain text', async () => {
@@ -179,4 +205,52 @@ test('throttle: keys older than 7 days are pruned on write', async () => {
   const saved = JSON.parse(fs.readFileSync(sentFile, 'utf-8'));
   assert.equal(saved.ancient, undefined);
   assert.equal(typeof saved.k5, 'number');
+});
+
+test('the plain-text retry keeps link targets', async () => {
+  nextStatuses = [400];
+  await notify.send('BUY X\n<a href="https://solscan.io/tx/abc">tx on Solscan</a>');
+  assert.equal(calls[1].body.text, 'BUY X\ntx on Solscan (https://solscan.io/tx/abc)');
+});
+
+test('send never rejects, even on null options', async () => {
+  await assert.doesNotReject(() => notify.send('x', null));
+});
+
+test('throttle: a failed delivery does not use up the slot', async () => {
+  nextStatuses = [500];
+  await notify.send('a', { key: 'k6', everyMs: 60_000 });
+  await notify.send('a', { key: 'k6', everyMs: 60_000 });
+  assert.equal(calls.length, 2, 'nothing was delivered, so the next send tries again');
+});
+
+test('throttle: a plain-text retry that succeeds counts as delivered', async () => {
+  nextStatuses = [400];   // HTML rejected, plain text accepted
+  await notify.send('<b>a</b>', { key: 'k7', everyMs: 60_000 });
+  await notify.send('<b>a</b>', { key: 'k7', everyMs: 60_000 });
+  assert.equal(calls.length, 2, 'HTML attempt + plain text, then suppressed');
+});
+
+test('throttle: without Telegram credentials nothing is recorded', async () => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  try {
+    await notify.send('a', { key: 'k8', everyMs: 60_000 });
+  } finally {
+    process.env.TELEGRAM_BOT_TOKEN = token;
+  }
+  await notify.send('a', { key: 'k8', everyMs: 60_000 });
+  assert.equal(calls.length, 1);
+});
+
+test('throttle: a valid-JSON non-object file counts as empty', async () => {
+  seedSent('123');
+  await notify.send('a', { key: 'k9', everyMs: 60_000 });
+  assert.equal(calls.length, 1);
+});
+
+test('throttle: a timestamp in the future (clock stepped back) does not mute alerts', async () => {
+  seedSent({ k10: Date.now() + 3600_000 });
+  await notify.send('a', { key: 'k10', everyMs: 60_000 });
+  assert.equal(calls.length, 1);
 });
