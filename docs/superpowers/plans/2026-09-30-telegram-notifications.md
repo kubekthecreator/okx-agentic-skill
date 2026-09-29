@@ -303,7 +303,7 @@ test('a network error never escapes send', async () => {
   const realFetch = globalThis.fetch;
   globalThis.fetch = async () => { throw new Error('ECONNRESET'); };
   try {
-    await notify.send('x');   // must resolve, not reject
+    await assert.doesNotReject(() => notify.send('x'));
   } finally {
     globalThis.fetch = realFetch;
   }
