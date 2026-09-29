@@ -112,6 +112,10 @@ test('fmtSigned drops the sign when the value rounds to zero; fmtInt rounds', ()
   assert.equal(notify.fmtInt(1234.5678), '1,235');
 });
 
+test('fmtInt never renders a negative zero', () => {
+  assert.equal(notify.fmtInt(-0.4), '0');
+});
+
 test('clip never splits an emoji in half', () => {
   const s = notify.clip('x'.repeat(298) + '😀😀😀');
   assert.ok(s.isWellFormed());
@@ -253,4 +257,24 @@ test('throttle: a timestamp in the future (clock stepped back) does not mute ale
   seedSent({ k10: Date.now() + 3600_000 });
   await notify.send('a', { key: 'k10', everyMs: 60_000 });
   assert.equal(calls.length, 1);
+});
+
+test('throttle: same-key sends fired together deliver once', async () => {
+  await Promise.all([
+    notify.send('a', { key: 'k11', everyMs: 60_000 }),
+    notify.send('a', { key: 'k11', everyMs: 60_000 }),
+  ]);
+  assert.equal(calls.length, 1);
+});
+
+test('throttle: a network error does not use up the slot (DNS down after a reboot)', async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('getaddrinfo ENOTFOUND api.telegram.org'); };
+  try {
+    await notify.send('a', { key: 'k12', everyMs: 60_000 });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  await notify.send('a', { key: 'k12', everyMs: 60_000 });
+  assert.equal(calls.length, 1, 'delivered once the network is back');
 });

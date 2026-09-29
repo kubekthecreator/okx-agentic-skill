@@ -73,7 +73,7 @@ export function fmtSigned(v, prefix = '', suffix = '') {
 }
 
 export function fmtInt(n) {
-  return Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : 'n/a';
+  return Number.isFinite(n) ? (Math.round(n) + 0).toLocaleString('en-US') : 'n/a';
 }
 
 const REASONS = {
@@ -195,11 +195,17 @@ function toPlainText(html) {
     .replace(/&amp;/g, '&');
 }
 
+// Keys being delivered right now. The record happens only after delivery,
+// so without this a burst of same-key alerts (e.g. several rejections with
+// the same message) would all pass the check and all go out.
+const inFlight = new Set();
+
 // Never throws: alert delivery must not affect trading decisions.
+// opts: { silent = false, key = null, everyMs = 0 }
 export async function send(html, opts) {
   try {
     const { silent = false, key = null, everyMs = 0 } = opts ?? {};
-    if (key && isThrottled(key, everyMs)) {
+    if (key && (inFlight.has(key) || isThrottled(key, everyMs))) {
       logger.info('alert_throttled', { key });
       return;
     }
@@ -209,14 +215,19 @@ export async function send(html, opts) {
     const chat = process.env.TELEGRAM_CHAT_ID;
     if (!token || !chat) return;
 
-    let status = await post(token, {
-      chat_id: chat, text: html, parse_mode: 'HTML', disable_notification: silent,
-    });
-    if (status === 400) {
-      // Markup rejected → the same content as plain text rather than nothing.
-      status = await post(token, { chat_id: chat, text: toPlainText(html), disable_notification: silent });
+    if (key) inFlight.add(key);
+    try {
+      let status = await post(token, {
+        chat_id: chat, text: html, parse_mode: 'HTML', disable_notification: silent,
+      });
+      if (status === 400) {
+        // Markup rejected → the same content as plain text rather than nothing.
+        status = await post(token, { chat_id: chat, text: toPlainText(html), disable_notification: silent });
+      }
+      if (key && status === 200) markSent(key);
+    } finally {
+      if (key) inFlight.delete(key);
     }
-    if (key && status === 200) markSent(key);
   } catch (err) {
     logger.warn('alert_failed', { error: err.message });
   }
