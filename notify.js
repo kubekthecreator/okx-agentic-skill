@@ -232,3 +232,113 @@ export async function send(html, opts) {
     logger.warn('alert_failed', { error: err.message });
   }
 }
+
+// ─── Tick health: blind detector + report counters ─────────────────────────
+
+const BLIND_AFTER_TICKS = 5;   // ≈ 5.5 min at the ~65 s real tick
+
+const health = {
+  streak: 0,            // consecutive failed ticks
+  streakSince: null,    // ts of the first failure in the streak
+  alerted: false,       // BLIND already sent for this streak
+  day: { ticks: 0, failed: 0 },
+  week: { since: Date.now(), ticks: 0, failed: 0 },
+};
+
+// Call once per main tick. Edge-triggered: one loud alert on the 5th
+// consecutive failure, one silent note on the first success after it.
+export async function tickResult(ok, error = null, now = Date.now()) {
+  health.day.ticks++;
+  health.week.ticks++;
+  if (ok) {
+    if (health.alerted) {
+      await send(
+        `✅ <b>okx-bot recovered</b> after ${fmtDuration(now - health.streakSince)} of failed ticks`,
+        { silent: true }
+      );
+    }
+    health.streak = 0;
+    health.streakSince = null;
+    health.alerted = false;
+    return;
+  }
+  health.day.failed++;
+  health.week.failed++;
+  if (health.streak === 0) health.streakSince = now;
+  health.streak++;
+  if (health.streak === BLIND_AFTER_TICKS) {
+    health.alerted = true;
+    await send(
+      `🚨 <b>okx-bot BLIND</b> — ${BLIND_AFTER_TICKS} ticks failed in a row (${fmtDuration(now - health.streakSince)})\n` +
+      `Last error: <code>${esc(clip(error))}</code>\n` +
+      `It is running but can't read the market or wallet: no new entries, and stop checks are probably failing too.`
+    );
+  }
+}
+
+// ─── Reports ───────────────────────────────────────────────────────────────
+
+const FUNNEL_LABELS = {
+  no_data: 'no candles',
+  trend_failed: 'trend ✗',
+  momentum_failed: 'momentum ✗',
+  valuation_failed: 'too extended ✗',
+  catalyst_failed: 'catalyst ✗',
+  slow_mode_requires_smart_money: 'slow mode needs smart money ✗',
+  risk_gate: 'risk gate ✗',
+  size_below_min: 'size below min ✗',
+  no_gas: 'no SOL gas ✗',
+  entry_failed: 'entry failed ✗',
+  entered: 'entered ✓',
+};
+
+// day: stats of the UTC day that just ended (state.rotateDaily's return).
+// open_positions: [{ symbol, pnl_pct (null when unknown), held_ms }].
+// A quiet day — no trades, nothing open, no failed ticks — sends nothing.
+export async function dailyReport({ day, portfolio_usd, open_positions }) {
+  const { ticks, failed } = health.day;
+  health.day = { ticks: 0, failed: 0 };
+  if (day.trades === 0 && open_positions.length === 0 && failed === 0) {
+    logger.info('daily_report_skipped_quiet', { date: day.date, ticks });
+    return;
+  }
+  const lines = [
+    `📊 <b>Day ${esc(day.date)}</b> (UTC) · ${modeLabel()}`,
+    `Trades ${day.trades} (${day.wins}W / ${day.losses}L) · realized ${fmtSigned(day.realized_pnl_usd, '$')}`,
+  ];
+  // In DRY RUN the wallet does not move with the simulated trades, so a
+  // wallet delta would read like bot PnL. LIVE only.
+  let portfolio = `Portfolio ${fmtUsd(portfolio_usd)}`;
+  if (!isDryRun() && day.starting_portfolio_usd > 0) {
+    portfolio += ` (${fmtSigned(portfolio_usd - day.starting_portfolio_usd, '$')} since day start)`;
+  }
+  lines.push(portfolio);
+  if (open_positions.length > 0) {
+    lines.push('Open: ' + open_positions.map(p =>
+      `${esc(p.symbol)} ${p.pnl_pct == null ? 'n/a' : fmtSigned(p.pnl_pct, '', '%')} (held ${fmtDuration(p.held_ms)})`
+    ).join(' · '));
+  }
+  lines.push(`Health: ${fmtInt(ticks)} ticks, ${fmtInt(failed)} failed`);
+  await send(lines.join('\n'), { silent: true });
+}
+
+// Sent on every Monday rotation whatever happened: its absence is the signal
+// that the bot (or the VPS) is gone. week: { trades, wins, pnl_usd } over the
+// last 7 days; funnel: strategy.takeFunnel().
+export async function weeklyHeartbeat({ portfolio_usd, week, funnel }) {
+  const { since, ticks, failed } = health.week;
+  health.week = { since: Date.now(), ticks: 0, failed: 0 };
+  const checks = funnel.checked || 0;
+  const outcomes = Object.entries(funnel)
+    .filter(([k, n]) => k !== 'checked' && n > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => `${esc(FUNNEL_LABELS[k] || k)} ${fmtInt(n)}`)
+    .join(' · ');
+  await send(
+    `💓 <b>okx-bot weekly</b> · ${modeLabel()} · since ${fmtTime(since)}\n` +
+    `${fmtInt(ticks)} ticks, ${fmtInt(failed)} failed · portfolio ${fmtUsd(portfolio_usd)}\n` +
+    `Trades ${week.trades} (${week.wins}W / ${week.trades - week.wins}L) · realized ${fmtSigned(week.pnl_usd, '$')}\n` +
+    `Entry filter, ${fmtInt(checks)} token checks: ${outcomes || 'none'}`,
+    { silent: true }
+  );
+}

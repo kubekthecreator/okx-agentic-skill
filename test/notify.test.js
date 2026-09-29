@@ -278,3 +278,109 @@ test('throttle: a network error does not use up the slot (DNS down after a reboo
   await notify.send('a', { key: 'k12', everyMs: 60_000 });
   assert.equal(calls.length, 1, 'delivered once the network is back');
 });
+
+// ─── Tick health (blind detector) ─────────────────────────────────────────
+
+test('tickResult: the 5th consecutive failure alerts once (loud), recovery once (silent)', async () => {
+  const t0 = Date.parse('2026-09-30T10:00:00Z');
+  await notify.tickResult(true, null, t0);   // clean slate
+  for (let i = 0; i < 4; i++) await notify.tickResult(false, 'cli_call_failed', t0 + i * 65_000);
+  assert.equal(calls.length, 0, 'no alert before the 5th failure');
+  await notify.tickResult(false, 'wallet balance: session expired', t0 + 4 * 65_000);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].body.text, /BLIND/);
+  assert.match(calls[0].body.text, /session expired/);
+  assert.equal(calls[0].body.disable_notification, false);
+  await notify.tickResult(false, 'still failing', t0 + 5 * 65_000);
+  assert.equal(calls.length, 1, 'one alert per incident');
+  await notify.tickResult(true, null, t0 + 20 * 60_000);
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].body.text, /recovered<\/b> after 20m/);
+  assert.equal(calls[1].body.disable_notification, true);
+  await notify.tickResult(true, null, t0 + 21 * 60_000);
+  assert.equal(calls.length, 2, 'no repeated recovery note');
+});
+
+test('tickResult: short blips below the threshold stay silent', async () => {
+  await notify.tickResult(true);
+  for (let i = 0; i < 4; i++) await notify.tickResult(false, 'blip');
+  await notify.tickResult(true);
+  assert.equal(calls.length, 0);
+});
+
+// ─── Reports ──────────────────────────────────────────────────────────────
+
+const quietDay = {
+  date: '2026-09-29', starting_portfolio_usd: 9.68,
+  trades: 0, wins: 0, losses: 0, consecutive_losses: 0, realized_pnl_usd: 0,
+};
+
+// dailyReport resets the day counters; earlier tests leave failures in them.
+async function drainDayCounters() {
+  await notify.dailyReport({ day: quietDay, portfolio_usd: 0, open_positions: [] });
+  calls.length = 0;
+}
+
+test('dailyReport: a quiet day sends nothing', async () => {
+  await drainDayCounters();
+  await notify.tickResult(true);
+  await notify.dailyReport({ day: quietDay, portfolio_usd: 9.68, open_positions: [] });
+  assert.equal(calls.length, 0);
+});
+
+test('dailyReport: an active day is reported silently from the ended day', async () => {
+  await drainDayCounters();
+  await notify.tickResult(true);
+  await notify.dailyReport({
+    day: { ...quietDay, trades: 2, wins: 1, losses: 1, realized_pnl_usd: 0.84 },
+    portfolio_usd: 10.52,
+    open_positions: [{ symbol: 'JUP', pnl_pct: 3.2, held_ms: 5 * 3600_000 }],
+  });
+  assert.equal(calls.length, 1);
+  const { text, disable_notification } = calls[0].body;
+  assert.equal(disable_notification, true);
+  assert.match(text, /Day 2026-09-29<\/b> \(UTC\) · DRY RUN/);
+  assert.match(text, /Trades 2 \(1W \/ 1L\) · realized \+\$0\.84/);
+  assert.match(text, /Portfolio \$10\.52\n/, 'DRY RUN shows no wallet delta');
+  assert.match(text, /Open: JUP \+3\.20% \(held 5h 0m\)/);
+  assert.match(text, /Health: 1 ticks, 0 failed/);
+});
+
+test('dailyReport: failed ticks alone make a day worth reporting', async () => {
+  await drainDayCounters();
+  await notify.tickResult(false, 'blip');
+  await notify.tickResult(true);
+  await notify.dailyReport({ day: quietDay, portfolio_usd: 9.68, open_positions: [] });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].body.text, /Health: 2 ticks, 1 failed/);
+});
+
+test('dailyReport: LIVE shows the wallet change since day start', async () => {
+  await drainDayCounters();
+  process.env.DRY_RUN = 'false';
+  try {
+    await notify.dailyReport({
+      day: { ...quietDay, trades: 1, wins: 1, realized_pnl_usd: 0.5 },
+      portfolio_usd: 10.18,
+      open_positions: [],
+    });
+    assert.match(calls[0].body.text, /Portfolio \$10\.18 \(\+\$0\.50 since day start\)/);
+  } finally {
+    process.env.DRY_RUN = 'true';
+  }
+});
+
+test('weeklyHeartbeat: always sent, silent, with the entry-filter breakdown', async () => {
+  await notify.weeklyHeartbeat({
+    portfolio_usd: 9.68,
+    week: { trades: 0, wins: 0, pnl_usd: 0 },
+    funnel: { checked: 1000, trend_failed: 700, momentum_failed: 250, no_data: 50 },
+  });
+  assert.equal(calls.length, 1);
+  const { text, disable_notification } = calls[0].body;
+  assert.equal(disable_notification, true);
+  assert.match(text, /okx-bot weekly<\/b> · DRY RUN · since /);
+  assert.match(text, /portfolio \$9\.68/);
+  assert.match(text, /Trades 0 \(0W \/ 0L\)/);
+  assert.match(text, /1,000 token checks: trend ✗ 700 · momentum ✗ 250 · no candles 50/);
+});
