@@ -308,6 +308,43 @@ test('tickResult: short blips below the threshold stay silent', async () => {
   assert.equal(calls.length, 0);
 });
 
+test('tickResult: a success resets the count, and a second incident alerts again', async () => {
+  const t0 = Date.parse('2026-09-30T12:00:00Z');
+  await notify.tickResult(true, null, t0);   // clean slate
+  for (let i = 0; i < 3; i++) await notify.tickResult(false, 'x', t0);
+  await notify.tickResult(true, null, t0);
+  for (let i = 0; i < 3; i++) await notify.tickResult(false, 'x', t0);
+  assert.equal(calls.length, 0, '3 + 3 failures split by a success are not 5 in a row');
+  for (let i = 0; i < 2; i++) await notify.tickResult(false, 'x', t0);
+  assert.equal(calls.length, 1, 'the 5th consecutive failure alerts');
+  await notify.tickResult(true, null, t0 + 60_000);   // silent recovery note
+  for (let i = 0; i < 5; i++) await notify.tickResult(false, 'y', t0 + 120_000);
+  assert.equal(calls.length, 3, 'BLIND, recovered, then BLIND again for the second incident');
+  assert.match(calls[2].body.text, /BLIND/);
+  await notify.tickResult(true, null, t0 + 180_000);   // leave a clean slate
+});
+
+test('tickResult: a BLIND alert Telegram did not take is retried on the next failed tick', async () => {
+  const t0 = Date.parse('2026-09-30T13:00:00Z');
+  await notify.tickResult(true, null, t0);
+  for (let i = 0; i < 4; i++) await notify.tickResult(false, 'x', t0);
+  nextStatuses = [500];
+  await notify.tickResult(false, 'x', t0);   // 5th: delivery fails
+  await notify.tickResult(false, 'x', t0);   // 6th: retried and delivered
+  await notify.tickResult(false, 'x', t0);   // 7th: already delivered, stays quiet
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].body.text, /BLIND<\/b> — 6 ticks failed in a row/);
+  await notify.tickResult(true, null, t0);
+});
+
+test('tickResult: a failure without an error message still renders', async () => {
+  const t0 = Date.parse('2026-09-30T14:00:00Z');
+  await notify.tickResult(true, null, t0);
+  for (let i = 0; i < 5; i++) await notify.tickResult(false, undefined, t0);
+  assert.match(calls[0].body.text, /Last error: <code>unknown<\/code>/);
+  await notify.tickResult(true, null, t0);
+});
+
 // ─── Reports ──────────────────────────────────────────────────────────────
 
 const quietDay = {
@@ -383,4 +420,58 @@ test('weeklyHeartbeat: always sent, silent, with the entry-filter breakdown', as
   assert.match(text, /portfolio \$9\.68/);
   assert.match(text, /Trades 0 \(0W \/ 0L\)/);
   assert.match(text, /1,000 token checks: trend ✗ 700 · momentum ✗ 250 · no candles 50/);
+});
+
+test('dailyReport: open positions alone make a day worth reporting', async () => {
+  await drainDayCounters();
+  await notify.tickResult(true);
+  await notify.dailyReport({
+    day: quietDay,
+    portfolio_usd: 9.68,
+    open_positions: [{ symbol: 'WIF', pnl_pct: null, held_ms: 3600_000 }],
+  });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].body.text, /Open: WIF n\/a \(held 1h 0m\)/);
+});
+
+async function drainWeekCounters() {
+  await notify.weeklyHeartbeat({ portfolio_usd: 0, week: { trades: 0, wins: 0, pnl_usd: 0 }, funnel: {} });
+  calls.length = 0;
+}
+
+test('weeklyHeartbeat: counts ticks since the last heartbeat, then starts over', async () => {
+  await drainWeekCounters();
+  await notify.tickResult(true);
+  await notify.tickResult(false, 'x');
+  await notify.tickResult(true);
+  const week = { trades: 0, wins: 0, pnl_usd: 0 };
+  await notify.weeklyHeartbeat({ portfolio_usd: 9.68, week, funnel: {} });
+  await notify.weeklyHeartbeat({ portfolio_usd: 9.68, week, funnel: {} });
+  assert.match(calls[0].body.text, /3 ticks, 1 failed/);
+  assert.match(calls[1].body.text, /0 ticks, 0 failed/);
+  assert.match(calls[1].body.text, /token checks: none$/);
+});
+
+test('weeklyHeartbeat: rejections listed biggest first; unknown outcomes by their key; zeros dropped', async () => {
+  await notify.weeklyHeartbeat({
+    portfolio_usd: 9.68,
+    week: { trades: 0, wins: 0, pnl_usd: 0 },
+    funnel: { checked: 100, no_data: 5, trend_failed: 60, something_new: 7, momentum_failed: 0 },
+  });
+  assert.match(calls[0].body.text, /100 token checks: trend ✗ 60 · something_new 7 · no candles 5$/);
+});
+
+test('send reports whether the alert was handled', async () => {
+  assert.equal(await notify.send('a'), true, 'delivered');
+  nextStatuses = [500];
+  assert.equal(await notify.send('b'), false, 'Telegram refused');
+  assert.equal(await notify.send('c', { key: 'k14', everyMs: 60_000 }), true);
+  assert.equal(await notify.send('c', { key: 'k14', everyMs: 60_000 }), true, 'throttled on purpose counts as handled');
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  try {
+    assert.equal(await notify.send('d'), true, 'not configured: nothing to retry');
+  } finally {
+    process.env.TELEGRAM_BOT_TOKEN = token;
+  }
 });

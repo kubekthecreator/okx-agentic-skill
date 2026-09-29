@@ -202,18 +202,21 @@ const inFlight = new Set();
 
 // Never throws: alert delivery must not affect trading decisions.
 // opts: { silent = false, key = null, everyMs = 0 }
+// Returns false only when Telegram is configured but did not accept the
+// message, so a caller with its own retry logic (tickResult) can try again.
+// Delivered, deliberately suppressed and not-configured all return true.
 export async function send(html, opts) {
   try {
     const { silent = false, key = null, everyMs = 0 } = opts ?? {};
     if (key && (inFlight.has(key) || isThrottled(key, everyMs))) {
       logger.info('alert_throttled', { key });
-      return;
+      return true;
     }
     logger.info('alert', { message: html, silent });
 
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chat = process.env.TELEGRAM_CHAT_ID;
-    if (!token || !chat) return;
+    if (!token || !chat) return true;
 
     if (key) inFlight.add(key);
     try {
@@ -225,11 +228,13 @@ export async function send(html, opts) {
         status = await post(token, { chat_id: chat, text: toPlainText(html), disable_notification: silent });
       }
       if (key && status === 200) markSent(key);
+      return status === 200;
     } finally {
       if (key) inFlight.delete(key);
     }
   } catch (err) {
     logger.warn('alert_failed', { error: err.message });
+    return false;
   }
 }
 
@@ -245,34 +250,37 @@ const health = {
   week: { since: Date.now(), ticks: 0, failed: 0 },
 };
 
-// Call once per main tick. Edge-triggered: one loud alert on the 5th
-// consecutive failure, one silent note on the first success after it.
+// Call once per main tick. Edge-triggered: one loud alert per streak of
+// failed ticks — from the 5th on, retried on the next failed tick if
+// Telegram didn't take it — and one silent note on the first success after.
 export async function tickResult(ok, error = null, now = Date.now()) {
   health.day.ticks++;
   health.week.ticks++;
   if (ok) {
-    if (health.alerted) {
-      await send(
-        `✅ <b>okx-bot recovered</b> after ${fmtDuration(now - health.streakSince)} of failed ticks`,
-        { silent: true }
-      );
-    }
+    const { alerted, streakSince } = health;
     health.streak = 0;
     health.streakSince = null;
     health.alerted = false;
+    if (alerted) {
+      await send(
+        `✅ <b>okx-bot recovered</b> after ${fmtDuration(now - streakSince)} of failed ticks`,
+        { silent: true }
+      );
+    }
     return;
   }
   health.day.failed++;
   health.week.failed++;
   if (health.streak === 0) health.streakSince = now;
   health.streak++;
-  if (health.streak === BLIND_AFTER_TICKS) {
-    health.alerted = true;
-    await send(
-      `🚨 <b>okx-bot BLIND</b> — ${BLIND_AFTER_TICKS} ticks failed in a row (${fmtDuration(now - health.streakSince)})\n` +
-      `Last error: <code>${esc(clip(error))}</code>\n` +
+  if (health.streak >= BLIND_AFTER_TICKS && !health.alerted) {
+    health.alerted = true;   // before the await: an overlapping call can't double-send
+    const delivered = await send(
+      `🚨 <b>okx-bot BLIND</b> — ${health.streak} ticks failed in a row (${fmtDuration(now - health.streakSince)})\n` +
+      `Last error: <code>${esc(clip(error ?? 'unknown'))}</code>\n` +
       `It is running but can't read the market or wallet: no new entries, and stop checks are probably failing too.`
     );
+    if (health.streak > 0) health.alerted = delivered;   // not undelivered → retry next failure
   }
 }
 
@@ -332,7 +340,7 @@ export async function weeklyHeartbeat({ portfolio_usd, week, funnel }) {
   const outcomes = Object.entries(funnel)
     .filter(([k, n]) => k !== 'checked' && n > 0)
     .sort((a, b) => b[1] - a[1])
-    .map(([k, n]) => `${esc(FUNNEL_LABELS[k] || k)} ${fmtInt(n)}`)
+    .map(([k, n]) => `${esc(Object.hasOwn(FUNNEL_LABELS, k) ? FUNNEL_LABELS[k] : k)} ${fmtInt(n)}`)
     .join(' · ');
   await send(
     `💓 <b>okx-bot weekly</b> · ${modeLabel()} · since ${fmtTime(since)}\n` +
