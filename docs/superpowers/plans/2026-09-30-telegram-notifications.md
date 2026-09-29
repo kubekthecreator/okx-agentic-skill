@@ -612,6 +612,21 @@ EOF
 
 ---
 
+> **Post-review amendment (owner-approved 2026-09-30).** A follow-up commit
+> superseded the Task 1 code above; the spec is `.superpowers/sdd/task-1-fix.md`.
+> - The throttle now records a key only after Telegram accepts the message
+>   (`isThrottled` + `markSent` replace `throttled`). A failed or credential-less
+>   send no longer uses up the slot.
+> - Non-object and future-dated entries are ignored.
+> - `send(html, opts)` tolerates `null`.
+> - `fmtUsd`, `fmtSigned`, `fmtInt` and `fmtDuration` return `'n/a'` for non-finite input.
+> - The sign follows the rounded value.
+> - `clip` never splits an emoji.
+> - The plain-text retry keeps link targets.
+> - Tests clean up their temp dir.
+>
+> Signatures used by later tasks are unchanged.
+
 ### Task 2: Blind-tick detector and periodic reports
 
 **Files:**
@@ -972,6 +987,21 @@ test('buy: LIVE links a Solana signature to Solscan and drops the DRY tag', asyn
     });
     assert.match(calls[0].body.text, new RegExp(`<a href="https://solscan\\.io/tx/${sig}">`));
     assert.doesNotMatch(calls[0].body.text, /DRY/);
+  } finally {
+    process.env.DRY_RUN = 'true';
+  }
+});
+
+test('buy: LIVE with a non-signature tx id (order id) shows it as code, not a link', async () => {
+  process.env.DRY_RUN = 'false';
+  try {
+    await notify.buy({
+      symbol: 'JUP', size_usd: 20, pct_of_portfolio: 20, entry_price_usd: 0.41,
+      setup_id: 'smart_money__no_rs', hard_stop_pct: 10, trailing_pct: 8, scale_out_pcts: [15, 30, 50],
+      tx_id: 'order-123',
+    });
+    assert.match(calls[0].body.text, /\ntx: <code>order-123<\/code>$/);
+    assert.doesNotMatch(calls[0].body.text, /Solscan/);
   } finally {
     process.env.DRY_RUN = 'true';
   }
@@ -1582,21 +1612,35 @@ test('a failing exit swap raises EXIT FAILING and leaves the position retryable'
   // −15% → hard stop fires; the swap then fails (e.g. slippage on a crash).
   execution.fetchCandles = async () => [{ ts: '', open: 0.85, high: 0.85, low: 0.85, close: 0.85, volume_usd: 1, complete: true }];
   execution.executeSwap = async () => { throw new Error('slippage_too_high:3.1'); };
+  // Capture what would go to Telegram (stubbed — nothing leaves the process).
+  const posted = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    posted.push(JSON.parse(opts.body));
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+  process.env.TELEGRAM_CHAT_ID = '42';
   try {
     await strategy.manageOpenPositions({ baseToken: { mint: 'usdc', decimals: 6 } });
     const still = state.getOpenPositions().find(p => p.id === pos.id);
     assert.ok(still, 'position stays open');
     assert.equal(still.exit_pending, null, 'exit_pending cleared so the next tick retries');
     assert.equal(strategy.getLastMark(pos.id).toFixed(2), '-15.00');
-    const sent = JSON.parse(fs.readFileSync(path.join(process.env.OKX_BOT_LOG_DIR, 'alerts_sent.json'), 'utf-8'));
-    assert.equal(typeof sent[`exit_failing:${pos.id}`], 'number', 'EXIT FAILING alert raised (throttle key recorded)');
+    const alert = posted.find(b => /EXIT JUP failing/.test(b.text));
+    assert.ok(alert, 'EXIT FAILING alert sent');
+    assert.equal(alert.disable_notification, false, 'loud');
+    assert.match(alert.text, /slippage_too_high:3\.1/);
   } finally {
     Object.assign(execution, real);
+    globalThis.fetch = realFetch;
+    delete process.env.TELEGRAM_BOT_TOKEN;
+    delete process.env.TELEGRAM_CHAT_ID;
   }
 });
 ```
 
-(`fs` and `path` are already imported at the top of `test/strategy.test.js`. The throttle file is written even without Telegram env, which is what makes the second assertion observable.)
+(Since the Task 1 review fix, the throttle records a key only after Telegram accepts the message. That is why this test stubs `fetch` and sets a dummy token instead of reading `alerts_sent.json`.)
 
 - [ ] **Step 2: Run the tests and confirm they fail**
 
