@@ -66,6 +66,10 @@ New module **`notify.js`** holds every Telegram message the bot can send. The
 catalog in one file is the single place to review "what can I receive".
 `logger.js` goes back to logging only.
 
+`deploy/Dockerfile` copies an explicit module list, so it gains `notify.js`. A
+test guards that list: a module missing from the image only shows up on the VPS,
+as a silent crash-restart loop.
+
 ### Transport
 
 - `send(html, { silent = false, key = null, everyMs = 0 })`
