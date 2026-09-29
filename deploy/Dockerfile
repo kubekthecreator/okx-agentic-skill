@@ -42,7 +42,7 @@ RUN groupadd --system --gid ${APP_GID} okxbot \
 
 # Copy installed deps from builder, then source.
 COPY --chown=okxbot:okxbot --from=builder /build/node_modules ./node_modules
-COPY --chown=okxbot:okxbot bot.js execution.js logger.js risk.js signals.js state.js strategy.js tokens.json package.json ./
+COPY --chown=okxbot:okxbot bot.js execution.js logger.js notify.js risk.js signals.js state.js strategy.js tokens.json package.json ./
 COPY --chown=okxbot:okxbot scripts ./scripts
 
 # Writable mount points. docker-compose maps these to host paths so state
