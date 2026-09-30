@@ -20,8 +20,8 @@ overtrading. None of these are clever. All of them require not feeling FOMO.
 
 1. **Every position needs a catalyst.** Chart patterns alone are noise. Entry
    requires smart-money confirmation, news flow, or on-chain holder growth.
-2. **AI as augmentation, not autonomy.** Material decisions can ping a human
-   with a veto window. Routine execution is automatic.
+2. **AI as augmentation, not autonomy.** Routine execution is automatic; a
+   human is pinged loudly only when something needs a decision or is broken.
 3. **Consistency beats conviction.** Same setup → same action, every time.
 4. **The first job of risk control is to stop trading.** Losing streaks,
    exhausted daily limits, and pattern-loss detection all trigger halts.
@@ -71,7 +71,8 @@ positions first, then scans for entries):
   exit by more than five minutes
 - **Every hour** — holder-count snapshot per whitelisted token; this builds
   the 24h baseline behind the on-chain-spike catalyst
-- **Every minute (clock only)** — daily-summary rollover check
+- **Daily (first tick after UTC midnight)** — daily report if the day had
+  trades, open positions or failed ticks; on Mondays also the weekly heartbeat
 
 ## Strategy completeness
 
@@ -217,7 +218,8 @@ CLI returns a confirming response (its backend wants a human in the loop),
 the bot does NOT pass `--force`. It alerts to Telegram with the CLI's
 next-step hint and leaves the position state correct (no entry on a
 blocked buy; `exit_pending` retained on a blocked exit until the operator
-acts).
+acts). Reminders are throttled: a blocked BUY at most every 6h per token,
+a blocked EXIT at most hourly per position.
 
 **Entry price always validated.** Entry price is derived from the swap
 quote response (`toToken.tokenUnitPrice`), with a 3×500ms candle fetch as
@@ -248,11 +250,15 @@ entry cost basis held across all open positions — the bot will never deploy
 more than this even if the wallet balance is higher. Default $200; unset or
 `0` disables the global cap (per-token caps in `tokens.json` still apply).
 
-**Material decisions ping a human.** Any position > 15% of portfolio
-dispatches a Telegram alert before execution. *Note:* full veto polling
-(reply STOP to cancel) is a roadmap item — current v0.1 alerts and
-proceeds; the alert is for visibility, not interactive approval. See
-`alertWithVeto` in [logger.js](logger.js).
+**Alerts are tiered, and loud only when you need to act.** Every Telegram
+message lives in [notify.js](notify.js). Loud: the bot can't start (sent
+before each exit of a Docker restart loop, at most every 6h), crashed, went
+blind (5 failed ticks in a row — e.g. CLI session expired or Market API
+quota exhausted), an exit is blocked or failing, a position is untracked,
+HALTED, or the bot stopped with open positions. With sound: BUY and EXIT.
+Silent: start/stop, scale-outs, Slow/Normal, profit target, the daily report
+and the weekly heartbeat. Repeating alerts are throttled per key, and the
+throttle survives restarts (`logs/alerts_sent.json`).
 
 **Confirming gates surface to Telegram.** When the OKX OnchainOS CLI's
 backend requires explicit human approval for a swap (e.g. risk-warning
@@ -281,8 +287,13 @@ Every decision is logged. Logs are structured JSON, written to
 **Per-trade log entry** includes entry signals, kill conditions assigned,
 exit reason, peak PnL during hold, exit quality, and full PnL accounting.
 
-**Daily summary** sent to Telegram on the first tick after UTC midnight:
-trade count, win/loss split, realized PnL, current machine state.
+**Daily report** on the first tick after UTC midnight, only if the day had
+trades, open positions or failed ticks: trades W/L, realized PnL, portfolio,
+open positions with their last PnL, tick health. **Weekly heartbeat** every
+Monday whatever happened: ticks and failures, portfolio, the week's trades,
+and how the entry filter rejected the week's token checks — if it stops
+arriving, the bot or the VPS is down. Set `TZ` (e.g. `Europe/Warsaw`) in
+`.env` for local times in alerts; unset means UTC.
 
 **Status command.** `npm run status` prints the live state to console:
 current portfolio, open positions with PnL, state machine status, today's
@@ -510,7 +521,9 @@ The full success-path output:
 ```
 
 Flow: signal eval passes → veto alert (material-position threshold
-hit at 25% of portfolio) → quote fetched live from OKX → dry_run_swap
+hit at 25% of portfolio; that separate alert was later removed and the
+BUY message now carries the share of portfolio) → quote fetched live
+from OKX → dry_run_swap
 recorded with expected fill amount → BUY alert with entry price derived
 from the quote's `toToken.tokenUnitPrice` (this is the P0 #1 fix —
 entry price is never null).
@@ -628,8 +641,8 @@ Things deliberately not in v0.1 to keep scope realistic for the
   data against the strategy. Critical for parameter tuning beyond the
   competition — in particular the volume-collapse threshold (70% below
   the entry bar's volume is easy to hit on a quiet hour).
-- **Telegram STOP polling.** `alertWithVeto` notifies but cannot yet read
-  a reply; material entries proceed after the alert.
+- **Telegram command channel.** Alerts are one-way; replying STOP or
+  approve (getUpdates polling) is not implemented.
 - **Chaotic-exit and time-of-day detectors.** Slow trigger on <5-minute
   holds and the time-of-day anti-pattern window are specified but not
   implemented.
