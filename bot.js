@@ -20,11 +20,18 @@ const execFileP = promisify(execFile);
 const TICK_INTERVAL_MS = parseInt(process.env.TICK_INTERVAL_MS || '60000', 10);
 const KILL_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const HOLDER_SNAPSHOT_INTERVAL_MS = 60 * 60 * 1000;
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
-const TOKENS = JSON.parse(
-  fs.readFileSync(path.join(process.cwd(), 'tokens.json'), 'utf-8')
-);
+// Read at startup like the preflight steps below: a broken whitelist must
+// alert too, or Docker's restart loop is silent.
+let TOKENS;
+try {
+  TOKENS = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'tokens.json'), 'utf-8'));
+} catch (err) {
+  console.error(`\n❌ Could not read tokens.json: ${err.message}\n`);
+  await notify.cannotStart('tokens_unreadable', `can't read tokens.json (${err.message})`,
+    'fix tokens.json (valid JSON with a "tokens" list) and redeploy');
+  process.exit(1);
+}
 
 setLogLevel(process.env.LOG_LEVEL || 'info');
 
@@ -51,7 +58,7 @@ async function preflightConfig() {
     logger.error('preflight_not_logged_in');
     console.error(`\n❌ onchainos CLI is not logged in.\nRun: \`onchainos wallet login <email>\` (or set up API Key login per dev-portal docs).\n`);
     await notify.cannotStart('cli_not_logged_in', 'the onchainos CLI is not logged in',
-      're-login the CLI for the bot (deploy/README.md, step 3)');
+      're-login the CLI for the bot (deploy/README.md, "Checking that the CLI is still authenticated")');
     process.exit(1);
   }
   logger.info('cli_auth_ok', {
@@ -85,6 +92,8 @@ let isShuttingDown = false;
 async function tick() {
   if (isShuttingDown) return;
   tickCount++;
+  let ok = false;
+  let error = null;
 
   try {
     // One `wallet balance` call per tick; derive both figures from it.
@@ -96,7 +105,14 @@ async function tick() {
     // numbers — v0.2 read state.daily from a separate timer and, about half
     // the time, after this rotation had already reset it.
     const endedDay = state.rotateDaily(portfolio_usd);
-    if (endedDay) sendPeriodicReports(endedDay, portfolio_usd);
+    if (endedDay) {
+      // A report must never break the tick (the rotation is already saved).
+      try {
+        sendPeriodicReports(endedDay, portfolio_usd);
+      } catch (err) {
+        logger.error('periodic_reports_failed', { error: err.message });
+      }
+    }
 
     // Evaluate state machine
     const stateInfo = risk.evaluateState(portfolio_usd);
@@ -131,11 +147,13 @@ async function tick() {
     if (scan.evaluated > 0 && scan.withData === 0) {
       throw new Error(`no market data: 0 of ${scan.evaluated} tokens returned candles`);
     }
-    await notify.tickResult(true);
+    ok = true;
   } catch (err) {
     logger.error('tick_failed', { tick: tickCount, error: err.message, stack: err.stack });
-    await notify.tickResult(false, err.message);
+    error = err.message;
   }
+  // Outside the try: exactly one health report per tick, whatever happened.
+  await notify.tickResult(ok, error);
 }
 
 // Daily report for the day that just ended (sent only if something happened)
@@ -153,14 +171,9 @@ function sendPeriodicReports(endedDay, portfolio_usd) {
     .catch(err => logger.error('daily_report_failed', { error: err.message }));
 
   if (new Date(now).getUTCDay() === 1) {
-    const week = s.history.filter(t => now - new Date(t.exit_ts).getTime() <= WEEK_MS);
     notify.weeklyHeartbeat({
       portfolio_usd,
-      week: {
-        trades: week.length,
-        wins: week.filter(t => t.realized_pnl_usd > 0).length,
-        pnl_usd: week.reduce((acc, t) => acc + t.realized_pnl_usd, 0),
-      },
+      week: state.getWeekSummary(now),
       funnel: strategy.takeFunnel(),
     }).catch(err => logger.error('weekly_heartbeat_failed', { error: err.message }));
   }
@@ -217,13 +230,18 @@ async function shutdown(signal) {
   if (isShuttingDown) return;
   isShuttingDown = true;
   logger.info('shutdown_initiated', { signal });
-  await notify.stopped({ signal, open_positions: state.getOpenPositions().length });
-  state.saveState();
-  // Flush the log stream so the last few lines (including this shutdown
-  // sequence) hit disk before exit. Without this they can be lost on a
-  // fast SIGTERM.
-  try { logger.flush && logger.flush(); } catch (_) { /* best effort */ }
-  process.exit(0);
+  try {
+    await notify.stopped({ signal, open_positions: state.getOpenPositions().length });
+  } finally {
+    // Later signals are ignored, so anything thrown above must not stop
+    // the save and the exit.
+    state.saveState();
+    // Flush the log stream so the last few lines (including this shutdown
+    // sequence) hit disk before exit. Without this they can be lost on a
+    // fast SIGTERM.
+    try { logger.flush && logger.flush(); } catch (_) { /* best effort */ }
+    process.exit(0);
+  }
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));

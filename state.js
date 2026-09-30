@@ -268,6 +268,17 @@ export function getRecentExitQuality(count = 5) {
   return sum / recent.length;
 }
 
+// Closed trades of the last 7 days, for the weekly heartbeat.
+export function getWeekSummary(now = Date.now()) {
+  const weekAgo = now - 7 * 24 * 3600_000;
+  const week = loadState().history.filter(t => new Date(t.exit_ts).getTime() >= weekAgo);
+  return {
+    trades: week.length,
+    wins: week.filter(t => t.realized_pnl_usd > 0).length,
+    pnl_usd: week.reduce((acc, t) => acc + t.realized_pnl_usd, 0),
+  };
+}
+
 export default {
   loadState,
   saveState,
@@ -283,4 +294,5 @@ export default {
   isSetupHalted,
   getRecentTrades,
   getRecentExitQuality,
+  getWeekSummary,
 };

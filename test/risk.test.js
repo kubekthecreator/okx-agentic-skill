@@ -202,3 +202,17 @@ test('onPositionClosed: 5 losses on a setup returns the setup pause', () => {
   assert.ok(Date.parse(r.setup_halt.until) > Date.now());
   assert.ok(state.isSetupHalted('smart_money__no_rs'));
 });
+
+// ─── Weekly heartbeat input ───────────────────────────────────────────────
+
+test('getWeekSummary counts closed trades of the last 7 days only', () => {
+  const s = resetState();
+  const now = Date.parse('2026-10-05T00:00:30Z');
+  s.history = [
+    { exit_ts: '2026-09-27T23:00:00Z', realized_pnl_usd: 5 },     // 8 days ago → out
+    { exit_ts: '2026-09-29T10:00:00Z', realized_pnl_usd: 1.5 },   // win
+    { exit_ts: '2026-10-04T20:00:00Z', realized_pnl_usd: -0.5 },  // loss
+    { exit_ts: '2026-10-04T21:00:00Z', realized_pnl_usd: 0 },     // flat: not a win
+  ];
+  assert.deepEqual(state.getWeekSummary(now), { trades: 3, wins: 1, pnl_usd: 1 });
+});
