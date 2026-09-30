@@ -96,7 +96,7 @@ as a silent crash-restart loop.
 
 | Tier | Sound | Messages |
 |---|---|---|
-| loud | yes | bot can't start, crashed, unhandled error, BLIND, EXIT BLOCKED, EXIT FAILING, BUY not tracked, HALTED, stopped **with** open positions |
+| loud | yes | bot can't start, crashed, unhandled error, BLIND, EXIT BLOCKED, EXIT FAILING, BUY not tracked, HALTED, stopped **with** open positions, a message that failed to build (fallback) |
 | normal | yes | BUY, EXIT, BUY BLOCKED |
 | silent | no | started, stopped (flat), recovered, scale-out, SLOW, back to NORMAL, daily profit target, daily report, weekly heartbeat |
 
@@ -124,6 +124,7 @@ The other messages are one-off events and are not throttled.
   and the last error.
 - On the next success after an alert: one silent "recovered after X".
 - The same function counts ticks and failures for the reports.
+- At most one BLIND per 30 min, so a flapping upstream can't spam. A clock stepped back never extends that window. A blind spell that outlasts it alerts on the next failed tick.
 
 ### Formatting
 
@@ -135,7 +136,7 @@ The other messages are one-off events and are not throttled.
 - Prices: `toLocaleString('en-US', { maximumSignificantDigits: 4 })`, which
   never uses exponent notation (`1.234e-7` gives `0.0000001234`).
 - Money: `fmtSigned` (moved from strategy.js), using the Unicode minus sign.
-- Durations: `45m`, `5h 12m`, `1d 6h`.
+- Durations: `45m`, `5h`, `5h 12m`, `1d 6h`, `2d` (zero parts are dropped).
 - `humanReason(code)` maps exit and state reason codes to words:
   - `hard_stop` → hard stop
   - `trailing_stop_<n>pct` → trailing stop (−n% from peak)
