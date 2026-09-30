@@ -16,7 +16,7 @@ async function main() {
   if (s.halt_until) console.log(`Halt until:      ${s.halt_until}`);
   if (s.post_win_cooldown_until) console.log(`Post-win cd:     ${s.post_win_cooldown_until}`);
 
-  console.log(`\nPortfolio:       ${formatUsd(portfolio)}`);
+  console.log(`\nSolana wallet:   ${formatUsd(portfolio)}`);
   console.log(`Cash (USDC):     ${formatUsd(cash)}`);
   console.log(`SOL (gas):       ${sol !== null ? sol.toFixed(4) : 'n/a'}`);
 

@@ -96,7 +96,7 @@ The agent will spawn `bot.js`, which runs the main loop indefinitely.
 
 - `npm start` — live trading
 - `npm run dev` — dry run (no transactions, simulated fills)
-- `npm run status` — current portfolio, open positions, state machine status
+- `npm run status` — Solana wallet value, open positions, state machine status
 
 ### Manual override
 
