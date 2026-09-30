@@ -52,7 +52,6 @@ const DEFAULT_STATE = () => ({
   machine_state: 'Normal',
   halt_until: null,
   post_win_cooldown_until: null,
-  last_summary_date: null,  // anchored on first tick; daily summary fires on rollover
   positions: {},
   history: [],
   daily: newDailyStats(0),
@@ -120,20 +119,22 @@ export function saveState() {
 }
 
 // Rotate daily stats at UTC midnight. Call this on every tick — it's a no-op
-// if the date hasn't changed.
+// if the date hasn't changed. Returns the stats of the day that just ended
+// (the daily report is built from them), or null when nothing rotated.
 export function rotateDaily(current_portfolio_usd) {
   const s = loadState();
-  if (s.daily.date !== utcDate()) {
-    logger.info('daily_rotation', {
-      previous_date: s.daily.date,
-      previous_realized_pnl_usd: s.daily.realized_pnl_usd,
-      trades: s.daily.trades,
-    });
-    s.daily = newDailyStats(current_portfolio_usd);
-    // Clear post-win cooldown at midnight (fresh start)
-    s.post_win_cooldown_until = null;
-    saveState();
-  }
+  if (s.daily.date === utcDate()) return null;
+  const ended = s.daily;
+  logger.info('daily_rotation', {
+    previous_date: ended.date,
+    previous_realized_pnl_usd: ended.realized_pnl_usd,
+    trades: ended.trades,
+  });
+  s.daily = newDailyStats(current_portfolio_usd);
+  // Clear post-win cooldown at midnight (fresh start)
+  s.post_win_cooldown_until = null;
+  saveState();
+  return ended;
 }
 
 // ─── Position operations ──────────────────────────────────────────────────

@@ -27,7 +27,6 @@ function resetState(daily = {}) {
     machine_state: 'Normal',
     halt_until: null,
     post_win_cooldown_until: null,
-    last_summary_date: null,
     positions: {},
     history: [],
     daily: {
@@ -161,4 +160,45 @@ test('unset MAX_PORTFOLIO_USD means no global cap', () => {
   const s = resetState();
   s.positions['a'] = { entry_value_usd: 5000, entry_amount_token: 1, current_amount_token: 1 };
   assert.equal(risk.computePositionSize({ portfolio_usd: 1000, cash_usd: 1000, token_config: token }), 50);
+});
+
+// ─── Daily rotation ───────────────────────────────────────────────────────
+
+test('rotateDaily returns the day that just ended, then null until the next rollover', () => {
+  const s = resetState({ date: '2026-09-28', trades: 2, wins: 1, losses: 1, realized_pnl_usd: 1.5 });
+  const ended = state.rotateDaily(123);
+  assert.equal(ended.date, '2026-09-28');
+  assert.equal(ended.trades, 2);
+  assert.equal(ended.realized_pnl_usd, 1.5);
+  assert.equal(s.daily.trades, 0, 'the new day starts empty');
+  assert.equal(s.daily.starting_portfolio_usd, 123);
+  assert.equal(state.rotateDaily(123), null, 'same day → no rotation');
+});
+
+// ─── Post-trade hooks feed the EXIT message ───────────────────────────────
+
+test('onPositionClosed: a win above 3% of portfolio returns the post-win cooldown', () => {
+  resetState();
+  const r = risk.onPositionClosed({ realized_pnl_usd: 4, daily_portfolio_at_close: 100, setup_id: 'smart_money__rs' });
+  assert.ok(Date.parse(r.cooldown_until) > Date.now());
+  assert.equal(state.loadState().post_win_cooldown_until, r.cooldown_until);
+  assert.equal(r.setup_halt, null);
+});
+
+test('onPositionClosed: a small win returns no cooldown', () => {
+  resetState();
+  const r = risk.onPositionClosed({ realized_pnl_usd: 1, daily_portfolio_at_close: 100, setup_id: 'smart_money__rs' });
+  assert.deepEqual(r, { cooldown_until: null, setup_halt: null });
+});
+
+test('onPositionClosed: 5 losses on a setup returns the setup pause', () => {
+  const s = resetState();
+  s.setup_stats['smart_money__no_rs'] = { trades: 6, wins: 1, losses: 5, halted_until: null };
+  const r = risk.onPositionClosed({ realized_pnl_usd: -1, daily_portfolio_at_close: 100, setup_id: 'smart_money__no_rs' });
+  assert.equal(r.cooldown_until, null);
+  assert.equal(r.setup_halt.setup_id, 'smart_money__no_rs');
+  assert.equal(r.setup_halt.wins, 1);
+  assert.equal(r.setup_halt.trades, 6);
+  assert.ok(Date.parse(r.setup_halt.until) > Date.now());
+  assert.ok(state.isSetupHalted('smart_money__no_rs'));
 });
