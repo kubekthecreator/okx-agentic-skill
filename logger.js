@@ -27,7 +27,8 @@ let fileLogBroken = false;
 
 // The file log is best effort: a full disk or an unwritable log dir must
 // never take the caller down, and alert delivery (notify.js) logs through
-// here. The first failure is reported once on the console (docker logs).
+// here. A failure is reported once per log file (so at most daily) on the
+// console (docker logs).
 function fileLogFailed(err) {
   if (fileLogBroken) return;
   fileLogBroken = true;
