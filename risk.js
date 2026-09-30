@@ -5,7 +5,8 @@
 //   2. Position sizing (capital allocation rules)
 //   3. Anti-pattern detector (halt setups that consistently lose)
 
-import { logger, alert } from './logger.js';
+import { logger } from './logger.js';
+import notify from './notify.js';
 import state from './state.js';
 
 const SLOW_TRAILING_PCT = 5;
@@ -59,7 +60,7 @@ export function evaluateState(_portfolio_usd) {
     // so the same still-true level doesn't re-halt once the cooldown ends.
     s.halt_trigger = { reason: haltReason, date: s.daily.date, trades: s.daily.trades };
     state.setMachineState('Halted', until);
-    alert(`🔴 *HALTED*\nReason: \`${haltReason}\`\nCooldown until: ${until}`);
+    notify.halted({ reason: haltReason, until, trailing_pct: SLOW_TRAILING_PCT });
     return { state: 'Halted', reason: haltReason };
   }
 
@@ -73,7 +74,7 @@ export function evaluateState(_portfolio_usd) {
   if (slowReason) {
     if (s.machine_state !== 'Slow') {
       state.setMachineState('Slow');
-      alert(`🟡 *SLOW MODE*\nReason: \`${slowReason}\``);
+      notify.slow({ reason: slowReason });
     }
     return { state: 'Slow', reason: slowReason };
   }
@@ -81,7 +82,7 @@ export function evaluateState(_portfolio_usd) {
   // Otherwise Normal
   if (s.machine_state !== 'Normal') {
     state.setMachineState('Normal');
-    alert(`🟢 *NORMAL*\nResumed standard operation`);
+    notify.normal();
   }
   return { state: 'Normal' };
 }
@@ -109,10 +110,7 @@ function notifyProfitTargetOnce(s) {
     s.daily.profit_target_alerted = true;   // reset naturally by daily rotation
     state.saveState();
     logger.info('daily_profit_target_hit', { daily_pnl_pct: pct });
-    alert(
-      `🎯 *DAILY PROFIT TARGET* ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%\n` +
-      `No new entries until UTC midnight. Open positions keep being managed.`
-    );
+    notify.profitTarget({ pct });
   }
 }
 
@@ -241,7 +239,10 @@ export function getHardStopPct() {
 // Called after a position closes. Handles:
 //   - post-win cooldown
 //   - anti-pattern detection
+// Returns what it decided so the EXIT message can say it in one place:
+//   { cooldown_until: ISO|null, setup_halt: { setup_id, until, wins, trades }|null }
 export function onPositionClosed(trade) {
+  const result = { cooldown_until: null, setup_halt: null };
   const realizedPctOfPortfolio = trade.daily_portfolio_at_close > 0
     ? (trade.realized_pnl_usd / trade.daily_portfolio_at_close) * 100
     : 0;
@@ -250,7 +251,7 @@ export function onPositionClosed(trade) {
   if (realizedPctOfPortfolio > POST_WIN_THRESHOLD_PCT) {
     const until = new Date(Date.now() + POST_WIN_COOLDOWN_MS).toISOString();
     state.setPostWinCooldown(until);
-    alert(`✅ *WIN +${realizedPctOfPortfolio.toFixed(2)}%* — cooldown 2h until ${until}`);
+    result.cooldown_until = until;
   }
 
   // Anti-pattern: 5 losses on same setup → halt that setup 24h
@@ -259,8 +260,10 @@ export function onPositionClosed(trade) {
   if (setupStats && setupStats.losses >= 5 && setupStats.wins / setupStats.trades < 0.3) {
     const until = new Date(Date.now() + SETUP_HALT_MS).toISOString();
     state.haltSetup(trade.setup_id, until);
-    alert(`⚠️ *ANTI-PATTERN* Setup \`${trade.setup_id}\` halted 24h\n${setupStats.wins}/${setupStats.trades} winrate`);
+    result.setup_halt = { setup_id: trade.setup_id, until, wins: setupStats.wins, trades: setupStats.trades };
   }
+
+  return result;
 }
 
 export default {

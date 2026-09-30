@@ -18,8 +18,8 @@ A disciplined trend-following bot for the OKX Agentic Wallet Trading Competition
 
 **AI as augmentation, not autonomy.** This bot enforces the rules emotions break.
 It has no FOMO, no panic, no revenge trading. It surfaces patterns and executes
-mechanically. For material decisions, alerts are dispatched to a human with a
-veto window.
+mechanically, and alerts a human loudly only when something needs a decision or
+is broken (see `notify.js`).
 
 **Consistency beats conviction.** This is not a system designed to nail bottoms
 or moonshots. It's designed to make the same disciplined decision every time the
@@ -39,7 +39,7 @@ accumulation, news event, or on-chain spike (holders growing, mint volume rising
 - Post-win cooldown to prevent overtrading
 - Anti-pattern detector: bot halts setups that consistently lose
 - Peak PnL tracking with exit quality measurement
-- Telegram alerts for all material events
+- Tiered Telegram alerts: loud only when action is needed (e.g. can't start, crash, blind, exit blocked/failing, Halted), trades with sound, the rest silent, plus a weekly heartbeat
 
 ## Entry Conditions
 
@@ -131,7 +131,8 @@ while the bot is stopped.
 - `risk.js` — state machine, position sizing, anti-pattern detector
 - `execution.js` — OKX OnchainOS API wrapper (swaps, balance checks)
 - `state.js` — persistent state (positions, history, PnL)
-- `logger.js` — structured logging + Telegram alerts
+- `logger.js` — structured logging
+- `notify.js` — every Telegram message: tiers, throttling, formatting
 - `tokens.json` — tradable token whitelist
 - `state.json` — runtime state (gitignored, auto-created)
 - `holders_history.json` — hourly holder-count snapshots per token (gitignored)

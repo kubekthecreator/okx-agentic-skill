@@ -1,9 +1,9 @@
-// logger.js — structured logging with Telegram alerts
+// logger.js — structured logging.
 //
 // Every decision the bot makes goes through here. Logs go to:
 //   1. Console (colored, human-readable)
 //   2. logs/bot-YYYY-MM-DD.log (structured JSON, one line per event)
-//   3. Telegram (for material events only — entries, exits, state changes)
+// Telegram alerts live in notify.js.
 //
 // The JSON log is the source of truth — sufficient to replay every decision.
 
@@ -23,6 +23,17 @@ const COLORS = {
 let currentLogLevel = LEVELS.info;
 let logStream = null;
 let currentLogDate = null;
+let fileLogBroken = false;
+
+// The file log is best effort: a full disk or an unwritable log dir must
+// never take the caller down, and alert delivery (notify.js) logs through
+// here. A failure is reported once per log file (so at most daily) on the
+// console (docker logs).
+function fileLogFailed(err) {
+  if (fileLogBroken) return;
+  fileLogBroken = true;
+  console.error(`[logger] file log disabled: ${err?.message ?? String(err)}`);
+}
 
 function ensureLogDir() {
   if (!fs.existsSync(LOG_DIR)) {
@@ -33,13 +44,19 @@ function ensureLogDir() {
 function getLogStream() {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== currentLogDate) {
-    if (logStream) logStream.end();
+    if (logStream) {
+      logStream.end();
+      logStream = null;
+    }
     ensureLogDir();
     currentLogDate = today;
     logStream = fs.createWriteStream(
       path.join(LOG_DIR, `bot-${today}.log`),
       { flags: 'a' }
     );
+    fileLogBroken = false;   // each new stream gets its own one-time notice
+    // Without a listener, ENOSPC/EACCES on the file would be an uncaughtException.
+    logStream.on('error', fileLogFailed);
   }
   return logStream;
 }
@@ -48,27 +65,37 @@ export function setLogLevel(level) {
   currentLogLevel = LEVELS[level] ?? LEVELS.info;
 }
 
+// Never throws, whatever the data: alert delivery (notify.js) logs through
+// here, so a logging failure must not take the caller down.
 function log(level, message, data = {}) {
-  if (LEVELS[level] < currentLogLevel) return;
+  try {
+    if (LEVELS[level] < currentLogLevel) return;
 
-  const entry = {
-    ts: new Date().toISOString(),
-    level,
-    msg: message,
-    ...data,
-  };
+    const ts = new Date().toISOString();
+    let line;
+    let dataStr = '';
+    try {
+      const d = data ?? {};
+      line = JSON.stringify({ ts, level, msg: message, ...d });
+      dataStr = Object.keys(d).length ? ' ' + JSON.stringify(d) : '';
+    } catch {
+      line = JSON.stringify({ ts, level, msg: message, data: '[unserializable]' });
+      dataStr = ' [unserializable data]';
+    }
 
-  // File: structured JSON
-  getLogStream().write(JSON.stringify(entry) + '\n');
+    // File: structured JSON, best effort (see fileLogFailed).
+    try {
+      getLogStream().write(line + '\n');
+    } catch (err) {
+      fileLogFailed(err);
+    }
 
-  // Console: human readable
-  const color = COLORS[level] || '';
-  const reset = COLORS.reset;
-  const prefix = `${color}[${entry.ts.slice(11, 19)} ${level.toUpperCase()}]${reset}`;
-  const dataStr = Object.keys(data).length
-    ? ' ' + JSON.stringify(data)
-    : '';
-  console.log(`${prefix} ${message}${dataStr}`);
+    // Console: human readable
+    const color = COLORS[level] || '';
+    console.log(`${color}[${ts.slice(11, 19)} ${String(level).toUpperCase()}]${COLORS.reset} ${message}${dataStr}`);
+  } catch {
+    /* logging must never throw */
+  }
 }
 
 export const logger = {
@@ -86,66 +113,5 @@ export const logger = {
     } catch (_) { /* ignore */ }
   },
 };
-
-// ─── Telegram ──────────────────────────────────────────────────────────────
-
-const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TG_CHAT = process.env.TELEGRAM_CHAT_ID;
-
-const TELEGRAM_TIMEOUT_MS = 5_000;
-
-export async function alert(message, opts = {}) {
-  // Always log
-  logger.info('alert', { message, ...opts });
-
-  if (!TG_TOKEN || !TG_CHAT) return;
-
-  // Bound the fetch so a stalled Telegram API (or DNS) can never block a
-  // tick. Strategy decisions don't depend on alert delivery succeeding.
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), TELEGRAM_TIMEOUT_MS);
-
-  try {
-    const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
-    const body = {
-      chat_id: TG_CHAT,
-      text: message,
-      parse_mode: 'Markdown',
-      disable_notification: opts.silent || false,
-    };
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      logger.warn('telegram_send_failed', { status: res.status });
-    }
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      logger.warn('telegram_timeout', { timeout_ms: TELEGRAM_TIMEOUT_MS });
-    } else {
-      logger.warn('telegram_error', { error: err.message });
-    }
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// Material-decision alert.
-//
-// Intent: surface large / risky entries to the operator BEFORE they execute,
-// even though v0.1 cannot poll Telegram for a STOP reply. The honest framing
-// is "you're being notified", not "you have 2 minutes to cancel" (which the
-// previous wording falsely implied).
-//
-// Returns false unconditionally — the strategy treats the lack of veto as
-// "proceed", which is intentional so the bot doesn't stall when the operator
-// is asleep. Polling getUpdates for an actual STOP reply is a roadmap item.
-export async function alertWithVeto(message) {
-  await alert(`⏸️ *Material decision* ${message}\n\n_v0.1 alerts but does not poll for replies; trade proceeds._`);
-  return false;
-}
 
 export default logger;

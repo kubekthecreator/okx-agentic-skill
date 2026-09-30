@@ -82,7 +82,9 @@ sudo -u okxbot ${EDITOR:-nano} .env
 
 Required entries: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional but
 strongly recommended), `MAX_PORTFOLIO_USD`, `MIN_TRADE_SIZE_USD`. Keep
-`DRY_RUN=true` until you've watched it run for at least 24h.
+`DRY_RUN=true` until you've watched it run for at least 24h. Optional:
+`TZ=Europe/Warsaw` (any IANA zone) so alert timestamps show local time;
+unset means the host's zone (UTC in the Docker image).
 
 ### 3. Log the CLI in **as the okxbot user**
 
@@ -284,7 +286,10 @@ onchainos swap execute --chain solana --from <SPL_MINT> --to <USDC_MINT> ...
 | Endless `candles_fallback` warnings for one token | Token mint changed / removed from OKX | Remove the entry from `tokens.json`, restart |
 | `state_load_failed_backup_saved` in logs | `state.json` corrupted (e.g. disk full mid-write) | A `state.json.corrupted-<ts>` was saved. Inspect; if recoverable, fix and rename back. Otherwise let the bot start fresh |
 | Bot logs `telegram_timeout` | Telegram API slow / blocked | Non-fatal, decisions still execute. Check connectivity if persistent |
-| `swap_confirming_required` alert | OKX backend wants human confirmation on a swap | Run the suggested CLI command manually OR ignore (position stays in `exit_pending` for 10min then retries) |
+| `swap_confirming_required` alert | OKX backend wants human confirmation on a swap | Run the suggested CLI command manually OR ignore (position stays in `exit_pending` for 10min then retries; the Telegram reminder repeats at most hourly) |
+| `telegram_send_failed` in logs | Telegram rejected the request — the log line carries Telegram's `description` (wrong token or chat id, bot blocked by the user) | Fix `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` in `.env`; a blocked bot is unblocked in Telegram itself. A 400 is retried once as plain text, so a wrong chat id logs two lines |
+| `alert_throttled` in logs | A repeating alert was suppressed on purpose (per-key throttle in `notify.js`) | Nothing to do. To reset all throttles, delete `alerts_sent.json` from the bot log directory (docker: `deploy/data/logs/`, systemd: `logs/`) |
+| `[logger] file log disabled: …` on the console | The bot cannot write its log dir (wrong owner on `deploy/data`, disk full) | Fix permissions or free space. Alerts and trading continue; only the JSON log is missing. Restart the container to resume it |
 | `spawn onchainos EACCES` / `ENOENT`, or `EISDIR` on state.json | Docker auto-created an empty **directory** at a bind-mount source that didn't exist as a file when `up` first ran | `docker compose down`; `sudo rm -rf` the bogus dir on the host; put a real file/binary there; `up` again. The CLI binary should be a real `cp` of `onchainos` into `/usr/local/bin/` (not a symlink into `/root/...`, which the container can't traverse). |
 | `wallet status` returns `loggedIn:false` despite host being logged in, or `Permission denied (os error 13)` writing `.onchainos` | **Docker userns-remap** is enabled — container UID 10001 maps to a different host UID, so `chown 10001` on the host auth dir doesn't grant container access | Quickest: run the container as root (`user: "0:0"` in compose) and `chown -R 0:0` + mount the auth dir to `/root/.onchainos`. Cleaner long-term: log the CLI in **from inside** the container so the session is created with the container's own identity. Check with `docker info \| grep -i userns`. |
 | `state_save_failed EBUSY: ... rename` | You're on an older compose that bind-mounted `state.json` as a **single file** | Fixed in current compose — persistence now uses a directory mount (`./data:/app/data`) + `OKX_BOT_STATE_FILE`. `git pull` and rebuild. Non-fatal regardless (caught; in-memory state stays consistent while the process runs). |
