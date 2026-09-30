@@ -108,3 +108,71 @@ test('buildKillConditions: zero-volume reference is skipped rather than dividing
   const kc = strategy.buildKillConditions(ev, candles([0], true));
   assert.equal(kc.find(k => k.type === 'volume_collapse'), undefined);
 });
+
+// ─── Wiring: blind scan + failing exit ────────────────────────────────────
+
+test('evaluateNewEntries: no candles for any token → withData 0 (blind tick) and the funnel counts it', async () => {
+  const execution = (await import('../execution.js')).default;
+  const realFetchCandles = execution.fetchCandles;
+  execution.fetchCandles = async () => [];
+  try {
+    strategy.takeFunnel();   // reset
+    const scan = await strategy.evaluateNewEntries({
+      tokens: [{ symbol: 'AAA', mint: 'a' }, { symbol: 'BBB', mint: 'b' }],
+      baseToken: { mint: 'usdc', decimals: 6 },
+      referenceMint: 'sol',
+      portfolio_usd: 100,
+      cash_usd: 100,
+    });
+    assert.deepEqual(scan, { evaluated: 2, withData: 0 });
+    assert.deepEqual(strategy.takeFunnel(), { checked: 2, no_data: 2 });
+    assert.deepEqual(strategy.takeFunnel(), {}, 'takeFunnel resets');
+  } finally {
+    execution.fetchCandles = realFetchCandles;
+  }
+});
+
+test('a failing exit swap raises EXIT FAILING and leaves the position retryable', async () => {
+  const execution = (await import('../execution.js')).default;
+  const state = (await import('../state.js')).default;
+  const real = { fetchCandles: execution.fetchCandles, executeSwap: execution.executeSwap };
+  const pos = state.openPosition({
+    token: { symbol: 'JUP', mint: 'jup', decimals: 6 },
+    entry_ts: new Date().toISOString(),
+    entry_price_usd: 1.0,
+    entry_amount_token: 100,
+    entry_value_usd: 100,
+    setup_id: 'smart_money__rs',
+    kill_conditions: [],
+    scale_out_proceeds_usd: 0,
+    scale_out_cost_usd: 0,
+  });
+  // −15% → hard stop fires; the swap then fails (e.g. slippage on a crash).
+  execution.fetchCandles = async () => [{ ts: '', open: 0.85, high: 0.85, low: 0.85, close: 0.85, volume_usd: 1, complete: true }];
+  execution.executeSwap = async () => { throw new Error('slippage_too_high:3.1'); };
+  // Capture what would go to Telegram (stubbed — nothing leaves the process).
+  const posted = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    posted.push(JSON.parse(opts.body));
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+  process.env.TELEGRAM_CHAT_ID = '42';
+  try {
+    await strategy.manageOpenPositions({ baseToken: { mint: 'usdc', decimals: 6 } });
+    const still = state.getOpenPositions().find(p => p.id === pos.id);
+    assert.ok(still, 'position stays open');
+    assert.equal(still.exit_pending, null, 'exit_pending cleared so the next tick retries');
+    assert.equal(strategy.getLastMark(pos.id).toFixed(2), '-15.00');
+    const alert = posted.find(b => /EXIT JUP failing/.test(b.text));
+    assert.ok(alert, 'EXIT FAILING alert sent');
+    assert.equal(alert.disable_notification, false, 'loud');
+    assert.match(alert.text, /slippage_too_high:3\.1/);
+  } finally {
+    Object.assign(execution, real);
+    globalThis.fetch = realFetch;
+    delete process.env.TELEGRAM_BOT_TOKEN;
+    delete process.env.TELEGRAM_CHAT_ID;
+  }
+});

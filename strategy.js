@@ -5,7 +5,8 @@
 //   - manageOpenPositions() — updates peaks, checks exits, executes scale-outs
 
 import { randomUUID } from 'crypto';
-import { logger, alert, alertWithVeto } from './logger.js';
+import { logger } from './logger.js';
+import notify from './notify.js';
 import signals from './signals.js';
 import risk from './risk.js';
 import execution, { CliConfirmingError } from './execution.js';
@@ -18,14 +19,41 @@ const SCALE_OUT_LEVELS = [
 ];
 const TIME_STOP_MS = 5 * 24 * 60 * 60 * 1000;  // 5 days
 const VOLUME_COLLAPSE_PCT = 70;
-const VETO_THRESHOLD_FRACTION = 0.15;  // positions > 15% of portfolio need veto
 const EXIT_PENDING_STALE_MS = 10 * 60 * 1000;  // 10 min: stuck exit_pending → clear
 const MIN_COMPLETED_CANDLES = 25;  // momentum needs 1h + 24h of closed bars
 
+// ─── Entry funnel + last marks (in memory, reset on restart) ───────────────
+//
+// funnel: how each token check of the entry scan ended — the weekly
+// heartbeat's "why no entries" line. lastMarks: latest unrealized PnL % per
+// open position, for the daily report.
+const funnel = {};
+const lastMarks = new Map();
+
+function count(outcome) {
+  funnel[outcome] = (funnel[outcome] || 0) + 1;
+}
+
+// Returns the counts since the last call and resets them.
+export function takeFunnel() {
+  const out = { ...funnel };
+  for (const k of Object.keys(funnel)) delete funnel[k];
+  return out;
+}
+
+export function getLastMark(positionId) {
+  return lastMarks.get(positionId) ?? null;
+}
+
 // ─── New entries ───────────────────────────────────────────────────────────
 
+// Returns { evaluated, withData }: tokens scanned vs tokens with enough
+// candles. bot.js treats evaluated > 0 && withData === 0 as a blind tick
+// (market data down, e.g. an exhausted Market API quota).
 export async function evaluateNewEntries({ tokens, baseToken, referenceMint, portfolio_usd, cash_usd }) {
   const machineState = state.loadState().machine_state;
+  let evaluated = 0;
+  let withData = 0;
 
   // Fetch reference candles once (SOL — used for relative strength)
   const refCandles = await execution.fetchCandles(referenceMint, 8);
@@ -33,13 +61,17 @@ export async function evaluateNewEntries({ tokens, baseToken, referenceMint, por
   for (const token of tokens) {
     // Skip if already in this token
     if (state.getOpenPositionForToken(token.symbol)) continue;
+    evaluated++;
+    count('checked');
 
     // Fetch data
     const candles = await execution.fetchCandles(token.mint, 48);
     if (signals.completedCandles(candles).length < MIN_COMPLETED_CANDLES) {
       logger.debug('skip_insufficient_candles', { token: token.symbol, candles: candles.length });
+      count('no_data');
       continue;
     }
+    withData++;
 
     // Chart-only signals first: pure and already paid for. Catalyst data is
     // another CLI call per token, so only fetch it once the chart qualifies.
@@ -48,6 +80,7 @@ export async function evaluateNewEntries({ tokens, baseToken, referenceMint, por
     const price = signals.evaluatePriceSignals(candles);
     if (!price.passed) {
       logger.debug('signal_eval', { token: token.symbol, passed: false, reason: price.reason });
+      count(price.reason);
       continue;
     }
 
@@ -67,12 +100,16 @@ export async function evaluateNewEntries({ tokens, baseToken, referenceMint, por
       reason: eval_.reason,
     });
 
-    if (!eval_.passed) continue;
+    if (!eval_.passed) {
+      count(eval_.reason);
+      continue;
+    }
 
     // Risk gate
     const gate = risk.canOpenPosition(eval_.setup_id);
     if (!gate.allowed) {
       logger.info('entry_blocked', { token: token.symbol, reason: gate.reason });
+      count('risk_gate');
       continue;
     }
 
@@ -85,6 +122,7 @@ export async function evaluateNewEntries({ tokens, baseToken, referenceMint, por
     });
     if (size === 0) {
       logger.info('entry_zero_size', { token: token.symbol });
+      count('size_below_min');
       continue;
     }
 
@@ -92,27 +130,21 @@ export async function evaluateNewEntries({ tokens, baseToken, referenceMint, por
     const pf = await execution.preflightCheck();
     if (!pf.ok) {
       logger.warn('entry_blocked_preflight', { token: token.symbol, reason: pf.reason });
+      count('no_gas');
       continue;
     }
 
-    // Veto for material positions
-    if (size / portfolio_usd > VETO_THRESHOLD_FRACTION) {
-      const vetoed = await alertWithVeto(
-        `🟢 Plan: BUY ${token.symbol} for $${size.toFixed(2)} (${((size / portfolio_usd) * 100).toFixed(1)}% of portfolio)\nSetup: ${eval_.setup_id}`,
-      );
-      if (vetoed) {
-        logger.info('entry_vetoed', { token: token.symbol });
-        continue;
-      }
-    }
-
     // Execute
-    await openPosition({ token, baseToken, size_usd: size, signals: eval_, candles });
+    const position = await openPosition({ token, baseToken, size_usd: size, portfolio_usd, signals: eval_, candles });
+    count(position ? 'entered' : 'entry_failed');
     cash_usd -= size;
   }
+
+  return { evaluated, withData };
 }
 
-async function openPosition({ token, baseToken, size_usd, signals: ev, candles }) {
+// Returns the new position, or null when the entry did not happen.
+async function openPosition({ token, baseToken, size_usd, portfolio_usd, signals: ev, candles }) {
   const clientOrderId = `entry-${randomUUID()}`;
   const fromAmount = String(Math.floor(size_usd * Math.pow(10, baseToken.decimals)));
 
@@ -126,17 +158,12 @@ async function openPosition({ token, baseToken, size_usd, signals: ev, candles }
     });
   } catch (err) {
     if (err instanceof CliConfirmingError) {
-      await alert(
-        `🟡 *BUY ${token.symbol} BLOCKED — confirmation required*\n` +
-        `${err.message}\n` +
-        `Next step (CLI): \`${err.next || 'see CLI output'}\`\n` +
-        `Bot will NOT auto-force. Run manually if intended.`
-      );
+      await notify.buyBlocked({ symbol: token.symbol, message: err.message, next: err.next });
       logger.warn('entry_swap_confirming', { token: token.symbol, message: err.message });
-      return;
+      return null;
     }
     logger.error('entry_swap_failed', { token: token.symbol, error: err.message });
-    return;
+    return null;
   }
 
   // Resolve entry price. Prefer the quote-derived unit price (already paid
@@ -152,12 +179,8 @@ async function openPosition({ token, baseToken, size_usd, signals: ev, candles }
       tx: fill.tx_id,
       dry_run: fill.dry_run,
     });
-    await alert(
-      `⚠️ *BUY ${token.symbol}* swap fired but entry price unavailable.\n` +
-      `TX: \`${fill.tx_id}\`\n` +
-      `Position NOT tracked — manual reconciliation required (close via CLI or wait for next entry to re-evaluate).`
-    );
-    return;
+    await notify.untracked({ symbol: token.symbol, tx_id: fill.tx_id });
+    return null;
   }
 
   const entry_amount_token = fill.filled_amount;
@@ -178,14 +201,17 @@ async function openPosition({ token, baseToken, size_usd, signals: ev, candles }
     scale_out_cost_usd: 0,
   });
 
-  await alert(
-    `🟢 *BUY ${token.symbol}*\n` +
-    `Size: $${size_usd.toFixed(2)}\n` +
-    `Entry: $${entry_price_usd}\n` +
-    `Setup: \`${ev.setup_id}\`\n` +
-    `TX: \`${fill.tx_id}\`` +
-    (fill.dry_run ? '\n_(dry run)_' : '')
-  );
+  await notify.buy({
+    symbol: token.symbol,
+    size_usd,
+    pct_of_portfolio: portfolio_usd > 0 ? (size_usd / portfolio_usd) * 100 : 0,
+    entry_price_usd,
+    setup_id: ev.setup_id,
+    hard_stop_pct: risk.getHardStopPct(),
+    trailing_pct: risk.getTrailingStopPct(),
+    scale_out_pcts: SCALE_OUT_LEVELS.map(l => l.pct),
+    tx_id: fill.tx_id,
+  });
   return position;
 }
 
@@ -264,6 +290,7 @@ async function managePosition(pos, baseToken) {
   if (candles.length === 0) return;
   const current_price = signals.lastPrice(candles);
   const pnl_pct = ((current_price - pos.entry_price_usd) / pos.entry_price_usd) * 100;
+  lastMarks.set(pos.id, pnl_pct);
 
   // Update peak
   if (pnl_pct > pos.peak_pnl_pct) {
@@ -349,12 +376,13 @@ async function checkScaleOuts(pos, baseToken, pnl_pct, current_price) {
       };
       state.updatePosition(pos.id, updates);
       Object.assign(pos, updates);
-      await alert(
-        `📤 *SCALE-OUT ${pos.token.symbol} @ +${level.pct}%*\n` +
-        `Sold ${(level.fraction * 100).toFixed(0)}% (${amount_to_sell.toFixed(4)}) for $${proceeds_usd.toFixed(2)}\n` +
-        `Booked: ${fmtSigned(proceeds_usd - cost_usd, '$')}\n` +
-        `TX: \`${fill.tx_id}\``
-      );
+      await notify.scaleOut({
+        symbol: pos.token.symbol,
+        level_pct: level.pct,
+        fraction: level.fraction,
+        proceeds_usd,
+        booked_usd: proceeds_usd - cost_usd,
+      });
     } catch (err) {
       logger.warn('scale_out_failed', { position_id: pos.id, level: level.pct, error: err.message });
     }
@@ -388,13 +416,13 @@ async function closeAll(pos, baseToken, current_price, reason) {
       // Position stays open with exit_pending set. Stale-clear will reset
       // after 10min so a real exit attempt can happen on a later tick after
       // the user (or CLI policy) clears the confirming gate.
-      await alert(
-        `🔴 *EXIT ${pos.token.symbol} BLOCKED — confirmation required*\n` +
-        `Reason: \`${reason}\`\n` +
-        `${err.message}\n` +
-        `Next step (CLI): \`${err.next || 'see CLI output'}\`\n` +
-        `Position held; exit will retry after manual confirmation.`
-      );
+      await notify.exitBlocked({
+        position_id: pos.id,
+        symbol: pos.token.symbol,
+        reason,
+        message: err.message,
+        next: err.next,
+      });
       logger.warn('close_swap_confirming', {
         position_id: pos.id, token: pos.token.symbol, reason, message: err.message,
       });
@@ -406,6 +434,14 @@ async function closeAll(pos, baseToken, current_price, reason) {
     // Clear the flag so the next tick can retry. Without this, the stale-clear
     // would only fire after EXIT_PENDING_STALE_MS, locking the position.
     state.updatePosition(pos.id, { exit_pending: null });
+    // A stop that cannot execute is money at risk — loud, hourly per position.
+    await notify.exitFailing({
+      position_id: pos.id,
+      symbol: pos.token.symbol,
+      reason,
+      pnl_pct: ((current_price - pos.entry_price_usd) / pos.entry_price_usd) * 100,
+      error: err.message,
+    });
   }
 }
 
@@ -466,21 +502,20 @@ async function finalizeClose(pos, current_price, reason, fill = null) {
 
   // For post-trade hooks
   trade.daily_portfolio_at_close = portfolio_usd;
-  risk.onPositionClosed(trade);
+  const close = risk.onPositionClosed(trade);
+  lastMarks.delete(pos.id);
 
-  const emoji = realized_pnl_usd > 0 ? '✅' : '❌';
-  await alert(
-    `${emoji} *EXIT ${pos.token.symbol}* @ ${fmtSigned(realized_pnl_pct, '', '%')}\n` +
-    `Reason: \`${reason}\`\n` +
-    `PnL: ${fmtSigned(realized_pnl_usd, '$')}\n` +
-    `Peak was: ${fmtSigned(pos.peak_pnl_pct, '', '%')}\n` +
-    `Exit quality: ${trade.exit_quality !== null ? (trade.exit_quality * 100).toFixed(0) + '%' : 'n/a'}`
-  );
-}
-
-function fmtSigned(v, prefix = '', suffix = '') {
-  const sign = v > 0 ? '+' : v < 0 ? '−' : '';
-  return `${sign}${prefix}${Math.abs(v).toFixed(2)}${suffix}`;
+  await notify.exit({
+    symbol: pos.token.symbol,
+    realized_pnl_pct,
+    realized_pnl_usd,
+    reason,
+    peak_pnl_pct: pos.peak_pnl_pct,
+    exit_quality: trade.exit_quality,
+    hold_ms: trade.hold_duration_ms,
+    day: state.loadState().daily,
+    close,
+  });
 }
 
 export default {
@@ -488,4 +523,6 @@ export default {
   manageOpenPositions,
   computeRealizedPnl,
   buildKillConditions,
+  takeFunnel,
+  getLastMark,
 };
