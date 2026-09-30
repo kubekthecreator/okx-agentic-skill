@@ -254,11 +254,13 @@ more than this even if the wallet balance is higher. Default $200; unset or
 message lives in [notify.js](notify.js). Loud alerts and trade alerts both
 ring; everything else arrives silently. Loud (act now): the bot can't start
 (sent before each exit of a Docker restart loop, at most every 6h), crashed
-or hit an unhandled error, went blind (5 failed ticks in a row — e.g. CLI
-session expired or Market API quota exhausted), an exit is blocked or
+or hit an unhandled error, went blind (5 failed ticks in a row, at most one
+alert per 30 min — e.g. CLI session expired or Market API quota exhausted),
+an exit is blocked or
 failing, a position is untracked, HALTED, or the bot stopped with open
 positions. With sound: BUY, EXIT, and a BUY that OKX held for manual
-confirmation. Silent: start/stop, recovery after a blind spell, scale-outs,
+confirmation. Silent: start, a stop with nothing open, recovery after a
+blind spell, scale-outs,
 Slow/Normal, profit target, the daily report and the weekly heartbeat.
 Repeating alerts are throttled per key, and the throttle survives restarts
 (`alerts_sent.json`, next to the bot logs).

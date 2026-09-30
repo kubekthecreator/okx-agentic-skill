@@ -104,7 +104,9 @@ as a silent crash-restart loop.
 
 | Message | Key | Interval |
 |---|---|---|
-| can't start | `cannot_start:<stable id>` (`cli_not_logged_in`, `cli_unrunnable`, `balance_unreadable`, `startup_crash`) | 6 h |
+| can't start | `cannot_start:<stable id>` (`tokens_unreadable`, `cli_not_logged_in`, `cli_unrunnable`, `balance_unreadable`, `startup_crash`); cleared by a successful start | 6 h |
+| BLIND | in memory, per process | 30 min between BLIND alerts (flapping upstream) |
+| message failed to build (fallback) | `alert_build_failed:<builder>` | 1 h |
 | crashed | `crash:<message>` | 1 h |
 | unhandled rejection | `unhandled:<message>` | 1 h |
 | EXIT BLOCKED | `exit_blocked:<position id>` | 1 h |
