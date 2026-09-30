@@ -39,7 +39,7 @@ accumulation, news event, or on-chain spike (holders growing, mint volume rising
 - Post-win cooldown to prevent overtrading
 - Anti-pattern detector: bot halts setups that consistently lose
 - Peak PnL tracking with exit quality measurement
-- Tiered Telegram alerts: loud only when action is needed (can't start, blind, exit blocked/failing, Halted), trades with sound, everything else silent, plus a weekly heartbeat
+- Tiered Telegram alerts: loud only when action is needed (e.g. can't start, crash, blind, exit blocked/failing, Halted), trades with sound, the rest silent, plus a weekly heartbeat
 
 ## Entry Conditions
 

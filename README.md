@@ -251,14 +251,17 @@ more than this even if the wallet balance is higher. Default $200; unset or
 `0` disables the global cap (per-token caps in `tokens.json` still apply).
 
 **Alerts are tiered, and loud only when you need to act.** Every Telegram
-message lives in [notify.js](notify.js). Loud: the bot can't start (sent
-before each exit of a Docker restart loop, at most every 6h), crashed, went
-blind (5 failed ticks in a row — e.g. CLI session expired or Market API
-quota exhausted), an exit is blocked or failing, a position is untracked,
-HALTED, or the bot stopped with open positions. With sound: BUY and EXIT.
-Silent: start/stop, scale-outs, Slow/Normal, profit target, the daily report
-and the weekly heartbeat. Repeating alerts are throttled per key, and the
-throttle survives restarts (`logs/alerts_sent.json`).
+message lives in [notify.js](notify.js). Loud alerts and trade alerts both
+ring; everything else arrives silently. Loud (act now): the bot can't start
+(sent before each exit of a Docker restart loop, at most every 6h), crashed
+or hit an unhandled error, went blind (5 failed ticks in a row — e.g. CLI
+session expired or Market API quota exhausted), an exit is blocked or
+failing, a position is untracked, HALTED, or the bot stopped with open
+positions. With sound: BUY, EXIT, and a BUY that OKX held for manual
+confirmation. Silent: start/stop, recovery after a blind spell, scale-outs,
+Slow/Normal, profit target, the daily report and the weekly heartbeat.
+Repeating alerts are throttled per key, and the throttle survives restarts
+(`alerts_sent.json`, next to the bot logs).
 
 **Confirming gates surface to Telegram.** When the OKX OnchainOS CLI's
 backend requires explicit human approval for a swap (e.g. risk-warning
@@ -293,7 +296,8 @@ open positions with their last PnL, tick health. **Weekly heartbeat** every
 Monday whatever happened: ticks and failures, portfolio, the week's trades,
 and how the entry filter rejected the week's token checks — if it stops
 arriving, the bot or the VPS is down. Set `TZ` (e.g. `Europe/Warsaw`) in
-`.env` for local times in alerts; unset means UTC.
+`.env` for local times in alerts; unset means the host's zone (UTC in the
+Docker image).
 
 **Status command.** `npm run status` prints the live state to console:
 current portfolio, open positions with PnL, state machine status, today's
