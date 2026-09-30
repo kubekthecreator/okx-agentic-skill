@@ -356,10 +356,16 @@ const FUNNEL_LABELS = {
   entered: 'entered ✓',
 };
 
+// The bot trades one chain (OKX_CHAIN, Solana) and sees only that part of the
+// shared OKX account, so this figure must never read as the whole portfolio.
+function walletLine(portfolio_usd, cash_usd) {
+  return `Solana wallet ${fmtUsd(portfolio_usd)} (incl. USDC ${fmtUsd(cash_usd)})`;
+}
+
 // day: stats of the UTC day that just ended (state.rotateDaily's return).
 // open_positions: [{ symbol, pnl_pct (null when unknown), held_ms }].
 // A quiet day — no trades, nothing open, no failed ticks — sends nothing.
-export async function dailyReport({ day, portfolio_usd, open_positions }) {
+export async function dailyReport({ day, portfolio_usd, cash_usd, open_positions }) {
   const { ticks, failed } = health.day;
   health.day = { ticks: 0, failed: 0 };
   if (day.trades === 0 && open_positions.length === 0 && failed === 0) {
@@ -372,11 +378,11 @@ export async function dailyReport({ day, portfolio_usd, open_positions }) {
   ];
   // In DRY RUN the wallet does not move with the simulated trades, so a
   // wallet delta would read like bot PnL. LIVE only.
-  let portfolio = `Portfolio ${fmtUsd(portfolio_usd)}`;
+  let wallet = walletLine(portfolio_usd, cash_usd);
   if (!isDryRun() && day.starting_portfolio_usd > 0) {
-    portfolio += ` (${fmtSigned(portfolio_usd - day.starting_portfolio_usd, '$')} since day start)`;
+    wallet += ` · ${fmtSigned(portfolio_usd - day.starting_portfolio_usd, '$')} since day start`;
   }
-  lines.push(portfolio);
+  lines.push(wallet);
   if (open_positions.length > 0) {
     lines.push('Open: ' + open_positions.map(p =>
       `${esc(p.symbol)} ${p.pnl_pct == null ? 'n/a' : fmtSigned(p.pnl_pct, '', '%')} (held ${fmtDuration(p.held_ms)})`
@@ -389,7 +395,7 @@ export async function dailyReport({ day, portfolio_usd, open_positions }) {
 // Sent on every Monday rotation whatever happened: its absence is the signal
 // that the bot (or the VPS) is gone. week: { trades, wins, pnl_usd } over the
 // last 7 days; funnel: strategy.takeFunnel().
-export async function weeklyHeartbeat({ portfolio_usd, week, funnel }) {
+export async function weeklyHeartbeat({ portfolio_usd, cash_usd, week, funnel }) {
   const { since, ticks, failed } = health.week;
   health.week = { since: Date.now(), ticks: 0, failed: 0 };
   const checks = funnel.checked || 0;
@@ -400,7 +406,7 @@ export async function weeklyHeartbeat({ portfolio_usd, week, funnel }) {
     .join(' · ');
   await send(
     `💓 <b>okx-bot weekly</b> · ${modeLabel()} · since ${fmtTime(since)}\n` +
-    `${fmtInt(ticks)} ticks, ${fmtInt(failed)} failed · portfolio ${fmtUsd(portfolio_usd)}\n` +
+    `${fmtInt(ticks)} ticks, ${fmtInt(failed)} failed · ${walletLine(portfolio_usd, cash_usd)}\n` +
     `Trades ${week.trades} (${week.wins}W / ${week.trades - week.wins}L) · realized ${fmtSigned(week.pnl_usd, '$')}\n` +
     `Entry filter, ${fmtInt(checks)} token checks: ${outcomes || 'none'}`,
     { silent: true }
@@ -409,13 +415,13 @@ export async function weeklyHeartbeat({ portfolio_usd, week, funnel }) {
 
 // ─── Lifecycle ─────────────────────────────────────────────────────────────
 
-export async function started({ portfolio_usd, open_positions }) {
+export async function started({ portfolio_usd, cash_usd, open_positions }) {
   // A good start ends every "can't start" incident: the next failure, even
   // an hour later, must alert again instead of waiting out the 6h window.
   forgetSent('cannot_start:');
   await send(
     `🚀 <b>okx-bot started</b> · ${modeLabel()}\n` +
-    `Portfolio ${fmtUsd(portfolio_usd)} · open positions ${open_positions}`,
+    `${walletLine(portfolio_usd, cash_usd)} · open positions ${open_positions}`,
     { silent: true }
   );
 }
@@ -464,7 +470,7 @@ export async function buy({ symbol, size_usd, pct_of_portfolio, entry_price_usd,
   hard_stop_pct, trailing_pct, scale_out_pcts, tx_id }) {
   const stopPrice = entry_price_usd * (1 - hard_stop_pct / 100);
   await send(
-    `🟢 <b>BUY ${esc(symbol)}</b> ${fmtUsd(size_usd)} (${fmtInt(pct_of_portfolio)}% of portfolio)${dryTag()}\n` +
+    `🟢 <b>BUY ${esc(symbol)}</b> ${fmtUsd(size_usd)} (${fmtInt(pct_of_portfolio)}% of Solana wallet)${dryTag()}\n` +
     `Entry ${fmtPrice(entry_price_usd)} · setup: ${esc(humanSetup(setup_id))}\n` +
     `Exits: stop ${fmtPrice(stopPrice)} (−${hard_stop_pct}%) · trail ${trailing_pct}% · ` +
     `scale-outs at ${scale_out_pcts.map(p => `+${p}%`).join('/')}` +
