@@ -23,6 +23,16 @@ const COLORS = {
 let currentLogLevel = LEVELS.info;
 let logStream = null;
 let currentLogDate = null;
+let fileLogBroken = false;
+
+// The file log is best effort: a full disk or an unwritable log dir must
+// never take the caller down, and alert delivery (notify.js) logs through
+// here. The first failure is reported once on the console (docker logs).
+function fileLogFailed(err) {
+  if (fileLogBroken) return;
+  fileLogBroken = true;
+  console.error(`[logger] file log disabled: ${err.message}`);
+}
 
 function ensureLogDir() {
   if (!fs.existsSync(LOG_DIR)) {
@@ -33,13 +43,18 @@ function ensureLogDir() {
 function getLogStream() {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== currentLogDate) {
-    if (logStream) logStream.end();
+    if (logStream) {
+      logStream.end();
+      logStream = null;
+    }
     ensureLogDir();
     currentLogDate = today;
     logStream = fs.createWriteStream(
       path.join(LOG_DIR, `bot-${today}.log`),
       { flags: 'a' }
     );
+    // Without a listener, ENOSPC/EACCES on the file would be an uncaughtException.
+    logStream.on('error', fileLogFailed);
   }
   return logStream;
 }
@@ -51,23 +66,31 @@ export function setLogLevel(level) {
 function log(level, message, data = {}) {
   if (LEVELS[level] < currentLogLevel) return;
 
+  const d = data ?? {};
   const entry = {
     ts: new Date().toISOString(),
     level,
     msg: message,
-    ...data,
+    ...d,
   };
 
-  // File: structured JSON
-  getLogStream().write(JSON.stringify(entry) + '\n');
+  // File: structured JSON, best effort (see fileLogFailed).
+  try {
+    getLogStream().write(JSON.stringify(entry) + '\n');
+  } catch (err) {
+    fileLogFailed(err);
+  }
 
   // Console: human readable
   const color = COLORS[level] || '';
   const reset = COLORS.reset;
   const prefix = `${color}[${entry.ts.slice(11, 19)} ${level.toUpperCase()}]${reset}`;
-  const dataStr = Object.keys(data).length
-    ? ' ' + JSON.stringify(data)
-    : '';
+  let dataStr = '';
+  try {
+    dataStr = Object.keys(d).length ? ' ' + JSON.stringify(d) : '';
+  } catch {
+    dataStr = ' [unserializable data]';
+  }
   console.log(`${prefix} ${message}${dataStr}`);
 }
 
