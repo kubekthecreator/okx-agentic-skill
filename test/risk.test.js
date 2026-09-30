@@ -9,6 +9,10 @@ import path from 'path';
 
 let state, risk;
 before(async () => {
+  // Unit tests must never reach Telegram, whatever the developer's shell exports.
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.TELEGRAM_CHAT_ID;
+  globalThis.fetch = () => { throw new Error('network is off in unit tests'); };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'okx-risk-test-'));
   process.env.OKX_BOT_STATE_FILE = path.join(dir, 'state.json');
   process.env.OKX_BOT_LOG_DIR = path.join(dir, 'logs');
@@ -209,10 +213,11 @@ test('getWeekSummary counts closed trades of the last 7 days only', () => {
   const s = resetState();
   const now = Date.parse('2026-10-05T00:00:30Z');
   s.history = [
-    { exit_ts: '2026-09-27T23:00:00Z', realized_pnl_usd: 5 },     // 8 days ago → out
+    { exit_ts: '2026-09-27T23:00:00Z', realized_pnl_usd: 5 },     // 7 d 1 h ago → out
+    { exit_ts: '2026-09-28T00:00:30Z', realized_pnl_usd: 2 },     // exactly 7 d → in
     { exit_ts: '2026-09-29T10:00:00Z', realized_pnl_usd: 1.5 },   // win
     { exit_ts: '2026-10-04T20:00:00Z', realized_pnl_usd: -0.5 },  // loss
     { exit_ts: '2026-10-04T21:00:00Z', realized_pnl_usd: 0 },     // flat: not a win
   ];
-  assert.deepEqual(state.getWeekSummary(now), { trades: 3, wins: 1, pnl_usd: 1 });
+  assert.deepEqual(state.getWeekSummary(now), { trades: 4, wins: 2, pnl_usd: 3 });
 });

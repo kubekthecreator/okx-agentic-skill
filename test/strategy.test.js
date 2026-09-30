@@ -9,6 +9,10 @@ import path from 'path';
 
 let strategy;
 before(async () => {
+  // Unit tests must never reach Telegram, whatever the developer's shell exports.
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.TELEGRAM_CHAT_ID;
+  globalThis.fetch = () => { throw new Error('network is off in unit tests'); };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'okx-strategy-test-'));
   process.env.OKX_BOT_STATE_FILE = path.join(dir, 'state.json');
   process.env.OKX_BOT_HOLDERS_FILE = path.join(dir, 'holders_history.json');
@@ -132,7 +136,8 @@ test('evaluateNewEntries: no candles for any token → withData 0 (blind tick) a
   }
 });
 
-test('a failing exit swap raises EXIT FAILING and leaves the position retryable', async () => {
+test('a failing exit swap raises EXIT FAILING and leaves the position retryable', async (t) => {
+  t.mock.method(console, 'log', () => {});   // the close_swap_failed ERROR line is expected here
   const execution = (await import('../execution.js')).default;
   const state = (await import('../state.js')).default;
   const real = { fetchCandles: execution.fetchCandles, executeSwap: execution.executeSwap };
@@ -169,10 +174,38 @@ test('a failing exit swap raises EXIT FAILING and leaves the position retryable'
     assert.ok(alert, 'EXIT FAILING alert sent');
     assert.equal(alert.disable_notification, false, 'loud');
     assert.match(alert.text, /slippage_too_high:3\.1/);
+    assert.match(alert.text, /failing<\/b> at −15\.00%/);
+    assert.match(alert.text, /Exit reason: hard stop/);
   } finally {
     Object.assign(execution, real);
     globalThis.fetch = realFetch;
     delete process.env.TELEGRAM_BOT_TOKEN;
     delete process.env.TELEGRAM_CHAT_ID;
+  }
+});
+
+test('evaluateNewEntries: tokens with enough candles count as data, one outcome each', async () => {
+  const execution = (await import('../execution.js')).default;
+  const realFetchCandles = execution.fetchCandles;
+  // 30 closed, flat hourly bars: enough data, but the chart filters reject it.
+  execution.fetchCandles = async () => Array.from({ length: 30 }, () => (
+    { ts: '', open: 1, high: 1, low: 1, close: 1, volume_usd: 100, complete: true }
+  ));
+  try {
+    strategy.takeFunnel();   // reset
+    const scan = await strategy.evaluateNewEntries({
+      tokens: [{ symbol: 'CCC', mint: 'c' }],
+      baseToken: { mint: 'usdc', decimals: 6 },
+      referenceMint: 'sol',
+      portfolio_usd: 100,
+      cash_usd: 100,
+    });
+    assert.deepEqual(scan, { evaluated: 1, withData: 1 }, 'not a blind tick');
+    const funnel = strategy.takeFunnel();
+    assert.equal(funnel.checked, 1);
+    assert.equal(funnel.no_data, undefined);
+    assert.equal(Object.keys(funnel).filter(k => k !== 'checked').length, 1, 'exactly one outcome per checked token');
+  } finally {
+    execution.fetchCandles = realFetchCandles;
   }
 });

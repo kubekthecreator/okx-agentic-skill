@@ -72,6 +72,8 @@ test('fmtDuration renders minutes, hours and days', () => {
   assert.equal(notify.fmtDuration(45 * 60_000), '45m');
   assert.equal(notify.fmtDuration((5 * 60 + 12) * 60_000), '5h 12m');
   assert.equal(notify.fmtDuration(30 * 3600_000), '1d 6h');
+  assert.equal(notify.fmtDuration(2 * 3600_000), '2h');
+  assert.equal(notify.fmtDuration(48 * 3600_000), '2d');
 });
 
 test('fmtSigned uses a real minus sign and fmtInt groups thousands', () => {
@@ -314,7 +316,7 @@ test('tickResult: short blips below the threshold stay silent', async () => {
   assert.equal(calls.length, 0);
 });
 
-test('tickResult: a success resets the count, and a second incident alerts again', async () => {
+test('tickResult: a success resets the count; a flapping second incident waits out the 30-min BLIND window', async () => {
   const t0 = Date.parse('2026-09-30T12:00:00Z');
   await notify.tickResult(true, null, t0);   // clean slate
   for (let i = 0; i < 3; i++) await notify.tickResult(false, 'x', t0);
@@ -325,13 +327,15 @@ test('tickResult: a success resets the count, and a second incident alerts again
   assert.equal(calls.length, 1, 'the 5th consecutive failure alerts');
   await notify.tickResult(true, null, t0 + 60_000);   // silent recovery note
   for (let i = 0; i < 5; i++) await notify.tickResult(false, 'y', t0 + 120_000);
-  assert.equal(calls.length, 3, 'BLIND, recovered, then BLIND again for the second incident');
+  assert.equal(calls.length, 2, 'blind again within 30 min of the last BLIND: quiet (flapping)');
+  await notify.tickResult(false, 'y', t0 + 31 * 60_000);
+  assert.equal(calls.length, 3, 'still blind after the window: BLIND again');
   assert.match(calls[2].body.text, /BLIND/);
-  await notify.tickResult(true, null, t0 + 180_000);   // leave a clean slate
+  await notify.tickResult(true, null, t0 + 32 * 60_000);   // leave a clean slate
 });
 
 test('tickResult: a BLIND alert Telegram did not take is retried on the next failed tick', async () => {
-  const t0 = Date.parse('2026-09-30T13:00:00Z');
+  const t0 = Date.parse('2026-09-30T14:00:00Z');
   await notify.tickResult(true, null, t0);
   for (let i = 0; i < 4; i++) await notify.tickResult(false, 'x', t0);
   nextStatuses = [500];
@@ -344,9 +348,10 @@ test('tickResult: a BLIND alert Telegram did not take is retried on the next fai
 });
 
 test('tickResult: a failure without an error message still renders', async () => {
-  const t0 = Date.parse('2026-09-30T14:00:00Z');
+  const t0 = Date.parse('2026-09-30T15:00:00Z');
   await notify.tickResult(true, null, t0);
-  for (let i = 0; i < 5; i++) await notify.tickResult(false, undefined, t0);
+  for (let i = 0; i < 4; i++) await notify.tickResult(false, undefined, t0);
+  await notify.tickResult(false, '', t0);   // an Error with an empty message
   assert.match(calls[0].body.text, /Last error: <code>unknown<\/code>/);
   await notify.tickResult(true, null, t0);
 });
@@ -385,7 +390,7 @@ test('dailyReport: an active day is reported silently from the ended day', async
   assert.match(text, /Day 2026-09-29<\/b> \(UTC\) · DRY RUN/);
   assert.match(text, /Trades 2 \(1W \/ 1L\) · realized \+\$0\.84/);
   assert.match(text, /Portfolio \$10\.52\n/, 'DRY RUN shows no wallet delta');
-  assert.match(text, /Open: JUP \+3\.20% \(held 5h 0m\)/);
+  assert.match(text, /Open: JUP \+3\.20% \(held 5h\)/);
   assert.match(text, /Health: 1 ticks, 0 failed/);
 });
 
@@ -437,7 +442,7 @@ test('dailyReport: open positions alone make a day worth reporting', async () =>
     open_positions: [{ symbol: 'WIF', pnl_pct: null, held_ms: 3600_000 }],
   });
   assert.equal(calls.length, 1);
-  assert.match(calls[0].body.text, /Open: WIF n\/a \(held 1h 0m\)/);
+  assert.match(calls[0].body.text, /Open: WIF n\/a \(held 1h\)/);
 });
 
 async function drainWeekCounters() {
@@ -695,4 +700,83 @@ test('crashed and unhandled with the same text use separate throttle keys', asyn
   await notify.crashed('same');
   await notify.unhandled('same');
   assert.equal(calls.length, 2);
+});
+
+test('a successful start re-arms "can\'t start" alerts', async () => {
+  await notify.cannotStart('cli_not_logged_in', 'r', 'h');
+  await notify.started({ portfolio_usd: 1, open_positions: 0 });
+  await notify.cannotStart('cli_not_logged_in', 'r', 'h');
+  assert.equal(calls.length, 3, 'DOWN, started, DOWN again (the incident ended at the good start)');
+});
+
+test('crash keys ignore digits, so one recurring error is throttled as one', async () => {
+  await notify.crashed('ETIMEDOUT after 5012 ms at 12:03:44');
+  await notify.crashed('ETIMEDOUT after 5877 ms at 12:04:51');
+  assert.equal(calls.length, 1);
+});
+
+test('clip scrubs credentials, token-shaped strings and control characters', () => {
+  process.env.OKX_SECRET_KEY = 'super-secret-value-123';
+  try {
+    const s = notify.clip('auth failed: super-secret-value-123 via bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw\u202e evil\r');
+    assert.doesNotMatch(s, /super-secret|AAHdq|\u202e|\r/);
+    assert.match(s, /auth failed: \[redacted\] via bot\[redacted\]/);
+  } finally {
+    delete process.env.OKX_SECRET_KEY;
+  }
+});
+
+test('clip bounds huge input before splitting it into code points', () => {
+  const s = notify.clip('x'.repeat(5_000_000));
+  assert.equal(Array.from(s).length, 300);
+});
+
+test('a LIVE order id is clipped so the BUY message stays under Telegram\'s limit', async () => {
+  process.env.DRY_RUN = 'false';
+  try {
+    await notify.buy({
+      symbol: 'JUP', size_usd: 20, pct_of_portfolio: 20, entry_price_usd: 0.41,
+      setup_id: 'smart_money__no_rs', hard_stop_pct: 10, trailing_pct: 8, scale_out_pcts: [15, 30, 50],
+      tx_id: 'o'.repeat(5000),
+    });
+    assert.ok(calls[0].body.text.length < 1000);
+  } finally {
+    process.env.DRY_RUN = 'true';
+  }
+});
+
+test('exit: a loss after a positive peak does not print "kept 0%"', async () => {
+  await notify.exit({
+    symbol: 'WIF', realized_pnl_pct: -10.3, realized_pnl_usd: -2.06, reason: 'hard_stop',
+    peak_pnl_pct: 1.2, exit_quality: 0, hold_ms: 5 * 3600_000,
+    day: { realized_pnl_usd: -2.06, wins: 0, losses: 1 },
+    close: { cooldown_until: null, setup_halt: null },
+  });
+  assert.doesNotMatch(calls[0].body.text, /kept/);
+  assert.match(calls[0].body.text, /\nHeld 5h\n/);
+});
+
+test('weeklyHeartbeat: inherited object keys are shown as-is, not as labels', async () => {
+  await notify.weeklyHeartbeat({
+    portfolio_usd: 1,
+    week: { trades: 0, wins: 0, pnl_usd: 0 },
+    funnel: { checked: 3, constructor: 3 },
+  });
+  assert.match(calls[0].body.text, /3 token checks: constructor 3$/);
+});
+
+test('default export passes arguments and results through on the happy path', async () => {
+  assert.equal(await notify.default.send('hello'), true);
+  await notify.default.scaleOut({ symbol: 'JUP', level_pct: 15, fraction: 0.2, proceeds_usd: 2.84, booked_usd: 0.37 });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].body.text, 'hello');
+  assert.match(calls[1].body.text, /Sold 20% for \$2\.84/);
+});
+
+test('default export: a non-Error throw still gives a fallback, throttled per builder', async () => {
+  const bad = { get symbol() { throw 'plain string'; } };
+  await assert.doesNotReject(() => notify.default.untracked(bad));
+  await notify.default.untracked(bad);
+  assert.equal(calls.length, 1, 'fallback throttled per builder');
+  assert.match(calls[0].body.text, /the "untracked" alert could not be built \(<code>plain string<\/code>\)/);
 });

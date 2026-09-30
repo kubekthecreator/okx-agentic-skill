@@ -410,6 +410,10 @@ async function closeAll(pos, baseToken, current_price, reason) {
       amount: String(Math.floor(amount * Math.pow(10, pos.token.decimals))),
       clientOrderId,
     });
+    // Deliberately NOT awaited inside this try: a failure after the swap
+    // succeeded (bookkeeping, the EXIT alert) must not land in the catch
+    // below, which would clear exit_pending and report EXIT FAILING for a
+    // position that is already sold.
     return finalizeClose(pos, current_price, reason, fill);
   } catch (err) {
     if (err instanceof CliConfirmingError) {

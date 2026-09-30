@@ -110,7 +110,7 @@ async function tick() {
       try {
         sendPeriodicReports(endedDay, portfolio_usd);
       } catch (err) {
-        logger.error('periodic_reports_failed', { error: err.message });
+        logger.error('periodic_reports_failed', { error: err.message, stack: err.stack });
       }
     }
 
@@ -208,8 +208,13 @@ async function holderSnapshotLoop() {
 
 async function tickRunner() {
   if (isShuttingDown) return;
-  await tick();
-  if (!isShuttingDown) setTimeout(tickRunner, TICK_INTERVAL_MS);
+  try {
+    await tick();
+  } finally {
+    // tick() handles its own errors; this keeps the loop alive even if the
+    // health report itself ever throws (the rejection still surfaces).
+    if (!isShuttingDown) setTimeout(tickRunner, TICK_INTERVAL_MS);
+  }
 }
 
 async function holderSnapshotRunner() {
@@ -230,12 +235,15 @@ async function shutdown(signal) {
   if (isShuttingDown) return;
   isShuttingDown = true;
   logger.info('shutdown_initiated', { signal });
+  // Save first: Docker's stop grace is 10 s and the alert below may wait on
+  // Telegram. Later signals are ignored, so nothing here may skip the exit.
   try {
-    await notify.stopped({ signal, open_positions: state.getOpenPositions().length });
-  } finally {
-    // Later signals are ignored, so anything thrown above must not stop
-    // the save and the exit.
     state.saveState();
+    await Promise.race([
+      notify.stopped({ signal, open_positions: state.getOpenPositions().length }),
+      new Promise(resolve => setTimeout(resolve, 3_000)),
+    ]);
+  } finally {
     // Flush the log stream so the last few lines (including this shutdown
     // sequence) hit disk before exit. Without this they can be lost on a
     // fast SIGTERM.

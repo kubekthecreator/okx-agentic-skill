@@ -5,7 +5,7 @@
 // Tiers:
 //   loud   — act now: can't start, crashed, unhandled error, blind,
 //            exit blocked/failing, untracked position, HALTED,
-//            stopped with open positions
+//            stopped with open positions, a message that failed to build
 //   normal — trades: BUY, EXIT, BUY blocked
 //   silent — FYI, no sound: started, stopped flat, recovered, scale-out,
 //            SLOW, back to NORMAL, profit target, daily report, weekly heartbeat
@@ -15,6 +15,7 @@
 // message is re-sent once as plain text — a formatting slip must never eat
 // an alert. Repeating alerts are throttled per key, and the last-sent map is
 // persisted next to the logs so a Docker crash-restart loop can't spam.
+// Dynamic text is clipped and scrubbed of credentials before it leaves.
 
 import fs from 'fs';
 import path from 'path';
@@ -31,13 +32,29 @@ export function esc(v) {
   return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// Credentials this process holds (OKX keys, the Telegram token) must never
+// be echoed into Telegram by some CLI error text: Telegram history is cloud
+// storage. Also drops control and bidi-override characters.
+const SECRET_ENV = /KEY|SECRET|TOKEN|PASSPHRASE|PASSWORD/i;
+function scrub(s) {
+  for (const [k, v] of Object.entries(process.env)) {
+    if (SECRET_ENV.test(k) && typeof v === 'string' && v.length >= 8) s = s.split(v).join('[redacted]');
+  }
+  return s
+    .replace(/bot\d{6,}:[\w-]{20,}/g, 'bot[redacted]')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, '');
+}
+
 export function clip(v, n = MAX_DYNAMIC_CHARS) {
-  const chars = Array.from(String(v ?? ''));   // code points: never split an emoji
+  // Cut before splitting into code points: a 10 MB stderr must not cost
+  // ~100 MB of heap in a 256 MB container.
+  const chars = Array.from(scrub(String(v ?? '').slice(0, n * 4)));   // code points: never split an emoji
   return chars.length > n ? chars.slice(0, n - 1).join('') + '…' : chars.join('');
 }
 
 // "29 Sept, 23:40 CEST" in the process time zone — set TZ (e.g.
-// Europe/Warsaw) in .env; unset means UTC. n/a for a missing or bad time.
+// Europe/Warsaw) in .env; unset means the host's zone (UTC in the Docker
+// image). n/a for a missing or bad time.
 export function fmtTime(ts) {
   const d = new Date(ts ?? NaN);   // new Date(null) would be 1970, not "missing"
   if (Number.isNaN(d.getTime())) return 'n/a';
@@ -51,8 +68,9 @@ export function fmtDuration(ms) {
   const m = Math.max(0, Math.round(ms / 60_000));
   if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ${m % 60}m`;
-  return `${Math.floor(h / 24)}d ${h % 24}h`;
+  if (h < 24) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
 }
 
 // 4 significant digits and never exponent notation, so BONK-sized prices
@@ -115,7 +133,7 @@ function txLine(txId) {
   if (/^[1-9A-HJ-NP-Za-km-z]{80,90}$/.test(txId)) {
     return `\n<a href="https://solscan.io/tx/${txId}">tx on Solscan</a>`;
   }
-  return `\ntx: <code>${esc(txId)}</code>`;
+  return `\ntx: <code>${esc(clip(txId, 100))}</code>`;
 }
 
 // ─── Transport ─────────────────────────────────────────────────────────────
@@ -142,6 +160,19 @@ function isThrottled(key, everyMs, now = Date.now()) {
   return typeof at === 'number' && at <= now && now - at < everyMs;
 }
 
+// Atomic (temp file + rename, like state.js): a kill mid-write must not
+// leave a truncated file behind.
+function writeSent(sent) {
+  const file = sentFile();
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify(sent));
+    fs.renameSync(`${file}.tmp`, file);
+  } catch (err) {
+    logger.warn('alerts_sent_write_failed', { error: err.message });
+  }
+}
+
 // Called only after Telegram accepted the message: a failed delivery must
 // not use up the slot, or DNS being down right after a VPS reboot would
 // mute exactly the alerts this exists for. Worst case: one duplicate.
@@ -152,12 +183,22 @@ function markSent(key, now = Date.now()) {
     const age = now - sent[k];
     if (!(age >= 0 && age < THROTTLE_KEEP_MS)) delete sent[k];
   }
-  try {
-    fs.mkdirSync(path.dirname(sentFile()), { recursive: true });
-    fs.writeFileSync(sentFile(), JSON.stringify(sent));
-  } catch (err) {
-    logger.warn('alerts_sent_write_failed', { error: err.message });
-  }
+  writeSent(sent);
+}
+
+// Drops the throttle entries whose key starts with `prefix`.
+function forgetSent(prefix) {
+  const sent = readSent();
+  const stale = Object.keys(sent).filter(k => k.startsWith(prefix));
+  if (stale.length === 0) return;
+  for (const k of stale) delete sent[k];
+  writeSent(sent);
+}
+
+// Digits and long ids vary per occurrence ("… 5012 ms at 12:03:44"): keep
+// them out of the throttle key so one recurring error counts as one.
+function errorKey(kind, message) {
+  return `${kind}:${clip(message, 100).replace(/\d+|[1-9A-HJ-NP-Za-km-z]{32,}/g, '#')}`;
 }
 
 // Returns the HTTP status, or null on timeout / network error.
@@ -242,12 +283,14 @@ export async function send(html, opts) {
 
 // ─── Tick health: blind detector + report counters ─────────────────────────
 
-const BLIND_AFTER_TICKS = 5;   // ≈ 5.5 min at the ~65 s real tick
+const BLIND_AFTER_TICKS = 5;           // ≈ 5.5 min at the ~65 s real tick
+const BLIND_REPEAT_MS = 30 * 60_000;   // a flapping upstream: at most one BLIND per 30 min
 
 const health = {
   streak: 0,            // consecutive failed ticks
   streakSince: null,    // ts of the first failure in the streak
-  alerted: false,       // BLIND already sent for this streak
+  alerted: false,       // BLIND delivered (or in flight) for this streak
+  lastBlindAt: null,    // when the last BLIND was delivered
   day: { ticks: 0, failed: 0 },
   week: { since: Date.now(), ticks: 0, failed: 0 },
 };
@@ -276,13 +319,17 @@ export async function tickResult(ok, error = null, now = Date.now()) {
   if (health.streak === 0) health.streakSince = now;
   health.streak++;
   if (health.streak >= BLIND_AFTER_TICKS && !health.alerted) {
+    // Flapping: blind again soon after a BLIND went out. Stay quiet until the
+    // window passes; a streak that is still running then alerts.
+    if (health.lastBlindAt !== null && now - health.lastBlindAt < BLIND_REPEAT_MS) return;
     health.alerted = true;   // before the await: an overlapping call can't double-send
     const delivered = await send(
       `🚨 <b>okx-bot BLIND</b> — ${health.streak} ticks failed in a row (${fmtDuration(now - health.streakSince)})\n` +
-      `Last error: <code>${esc(clip(error ?? 'unknown'))}</code>\n` +
+      `Last error: <code>${esc(clip(error || 'unknown'))}</code>\n` +
       `It is running but can't read the market or wallet: no new entries, and stop checks are probably failing too.`
     );
-    if (health.streak > 0) health.alerted = delivered;   // not undelivered → retry next failure
+    if (health.streak > 0) health.alerted = delivered;   // not delivered → retry next failure
+    if (delivered) health.lastBlindAt = now;
   }
 }
 
@@ -356,6 +403,9 @@ export async function weeklyHeartbeat({ portfolio_usd, week, funnel }) {
 // ─── Lifecycle ─────────────────────────────────────────────────────────────
 
 export async function started({ portfolio_usd, open_positions }) {
+  // A good start ends every "can't start" incident: the next failure, even
+  // an hour later, must alert again instead of waiting out the 6h window.
+  forgetSent('cannot_start:');
   await send(
     `🚀 <b>okx-bot started</b> · ${modeLabel()}\n` +
     `Portfolio ${fmtUsd(portfolio_usd)} · open positions ${open_positions}`,
@@ -377,19 +427,20 @@ export async function stopped({ signal, open_positions }) {
 export async function crashed(message) {
   await send(
     `🚨 <b>okx-bot crashed</b> — restarting\n<code>${esc(clip(message))}</code>`,
-    { key: `crash:${clip(message, 100)}`, everyMs: HOUR }
+    { key: errorKey('crash', message), everyMs: HOUR }
   );
 }
 
 export async function unhandled(message) {
   await send(
     `🚨 <b>Unhandled error</b> (the bot keeps running)\n<code>${esc(clip(message))}</code>`,
-    { key: `unhandled:${clip(message, 100)}`, everyMs: HOUR }
+    { key: errorKey('unhandled', message), everyMs: HOUR }
   );
 }
 
-// id: stable per failure kind (cli_not_logged_in, cli_unrunnable,
-// balance_unreadable, startup_crash) so a crash loop repeats at most every 6h.
+// id: stable per failure kind (tokens_unreadable, cli_not_logged_in,
+// cli_unrunnable, balance_unreadable, startup_crash) so a crash loop repeats
+// at most every 6h. A successful start re-arms it (see started).
 export async function cannotStart(id, reason, hint) {
   await send(
     `🚨 <b>okx-bot DOWN</b> — can't start: ${esc(clip(reason))}\n` +
@@ -449,7 +500,7 @@ export async function exit({ symbol, realized_pnl_pct, realized_pnl_usd, reason,
       `${fmtSigned(realized_pnl_pct, '', '%')} (${fmtSigned(realized_pnl_usd, '$')})${dryTag()}`,
     `Why: ${esc(humanReason(reason))} · peak ${fmtSigned(peak_pnl_pct, '', '%')}`,
     `Held ${fmtDuration(hold_ms)}` +
-      (exit_quality != null ? ` · kept ${fmtInt(exit_quality * 100)}% of peak gain` : ''),
+      (exit_quality != null && realized_pnl_pct > 0 ? ` · kept ${fmtInt(exit_quality * 100)}% of peak gain` : ''),
     `Today: ${fmtSigned(day.realized_pnl_usd, '$')} (${day.wins}W / ${day.losses}L)`,
   ];
   if (close.cooldown_until) {
@@ -523,10 +574,12 @@ function guarded(name, fn) {
     try {
       return await fn(...args);
     } catch (err) {
-      logger.warn('alert_build_failed', { name, error: err.message });
+      const msg = String(err?.message ?? err);   // a non-Error throw must not reject here
+      logger.warn('alert_build_failed', { name, error: msg });
       return send(
         `⚠️ <b>okx-bot</b>: the "${name}" alert could not be built ` +
-        `(<code>${esc(clip(err.message))}</code>) — see the logs.`
+        `(<code>${esc(clip(msg))}</code>) — see the logs.`,
+        { key: `alert_build_failed:${name}`, everyMs: HOUR }
       );
     }
   };
