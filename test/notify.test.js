@@ -86,6 +86,12 @@ test('fmtTime renders day, month, time and zone in the process time zone', () =>
   assert.match(notify.fmtTime('2026-09-29T21:40:00Z'), /^\d{1,2} \w+, \d{2}:\d{2} \S+$/);
 });
 
+test('fmtTime returns n/a for a missing or invalid time', () => {
+  assert.equal(notify.fmtTime(undefined), 'n/a');
+  assert.equal(notify.fmtTime(null), 'n/a');
+  assert.equal(notify.fmtTime('not a date'), 'n/a');
+});
+
 test('humanReason turns codes into words and passes unknown codes through', () => {
   assert.equal(notify.humanReason('trailing_stop_8pct'), 'trailing stop (−8% from peak)');
   assert.equal(notify.humanReason('volume_collapse_73pct'), 'volume collapsed 73% vs entry bar');
@@ -642,4 +648,51 @@ test('the default export exposes the whole catalog', () => {
     'exitBlocked', 'exitFailing', 'halted', 'slow', 'normal', 'profitTarget']) {
     assert.equal(typeof notify.default[name], 'function', name);
   }
+});
+
+test('default export: a message that fails to build never rejects; a fallback alert goes out', async () => {
+  await assert.doesNotReject(() => notify.default.buy({}));
+  await assert.doesNotReject(() => notify.default.exit({ symbol: 'JUP' }));
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].body.text, /the "buy" alert could not be built/);
+  assert.match(calls[1].body.text, /the "exit" alert could not be built/);
+  assert.equal(calls[0].body.disable_notification, false);
+});
+
+test('exit without close notes (caller passed none) still renders', async () => {
+  await notify.exit({
+    symbol: 'JUP', realized_pnl_pct: 1, realized_pnl_usd: 0.2, reason: 'catalyst_death',
+    peak_pnl_pct: 2, exit_quality: 0.5, hold_ms: 3600_000,
+    day: { realized_pnl_usd: 0.2, wins: 1, losses: 0 },
+  });
+  assert.match(calls[0].body.text, /Why: catalyst gone/);
+  assert.match(calls[0].body.text, /kept 50% of peak gain/);
+  assert.doesNotMatch(calls[0].body.text, /cooldown|paused/);
+});
+
+test('catalog throttle intervals: 6h for cannotStart and buyBlocked, 1h for the rest', async () => {
+  const H = 3600_000;
+  const cases = [
+    ['cannot_start:cli_unrunnable', 6 * H, () => notify.cannotStart('cli_unrunnable', 'r', 'h')],
+    ['buy_blocked:JUP', 6 * H, () => notify.buyBlocked({ symbol: 'JUP', message: 'm', next: 'n' })],
+    ['crash:boom', H, () => notify.crashed('boom')],
+    ['unhandled:boom', H, () => notify.unhandled('boom')],
+    ['exit_blocked:p9', H, () => notify.exitBlocked({ position_id: 'p9', symbol: 'JUP', reason: 'hard_stop', message: 'm', next: 'n' })],
+    ['exit_failing:p9', H, () => notify.exitFailing({ position_id: 'p9', symbol: 'JUP', reason: 'hard_stop', pnl_pct: -10, error: 'e' })],
+  ];
+  for (const [key, interval, fire] of cases) {
+    seedSent({ [key]: Date.now() - interval + 60_000 });   // a minute before the window ends
+    calls.length = 0;
+    await fire();
+    assert.equal(calls.length, 0, `${key} still suppressed just inside the window`);
+    seedSent({ [key]: Date.now() - interval - 60_000 });   // a minute after it ended
+    await fire();
+    assert.equal(calls.length, 1, `${key} sends again just after the window`);
+  }
+});
+
+test('crashed and unhandled with the same text use separate throttle keys', async () => {
+  await notify.crashed('same');
+  await notify.unhandled('same');
+  assert.equal(calls.length, 2);
 });

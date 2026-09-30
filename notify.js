@@ -37,9 +37,11 @@ export function clip(v, n = MAX_DYNAMIC_CHARS) {
 }
 
 // "29 Sept, 23:40 CEST" in the process time zone — set TZ (e.g.
-// Europe/Warsaw) in .env; unset means UTC.
+// Europe/Warsaw) in .env; unset means UTC. n/a for a missing or bad time.
 export function fmtTime(ts) {
-  return new Date(ts).toLocaleString('en-GB', {
+  const d = new Date(ts ?? NaN);   // new Date(null) would be 1970, not "missing"
+  if (Number.isNaN(d.getTime())) return 'n/a';
+  return d.toLocaleString('en-GB', {
     day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
   });
 }
@@ -404,7 +406,7 @@ export async function buy({ symbol, size_usd, pct_of_portfolio, entry_price_usd,
   hard_stop_pct, trailing_pct, scale_out_pcts, tx_id }) {
   const stopPrice = entry_price_usd * (1 - hard_stop_pct / 100);
   await send(
-    `🟢 <b>BUY ${esc(symbol)}</b> ${fmtUsd(size_usd)} (${pct_of_portfolio.toFixed(0)}% of portfolio)${dryTag()}\n` +
+    `🟢 <b>BUY ${esc(symbol)}</b> ${fmtUsd(size_usd)} (${fmtInt(pct_of_portfolio)}% of portfolio)${dryTag()}\n` +
     `Entry ${fmtPrice(entry_price_usd)} · setup: ${esc(humanSetup(setup_id))}\n` +
     `Exits: stop ${fmtPrice(stopPrice)} (−${hard_stop_pct}%) · trail ${trailing_pct}% · ` +
     `scale-outs at ${scale_out_pcts.map(p => `+${p}%`).join('/')}` +
@@ -433,7 +435,7 @@ export async function untracked({ symbol, tx_id }) {
 export async function scaleOut({ symbol, level_pct, fraction, proceeds_usd, booked_usd }) {
   await send(
     `📤 <b>SCALE-OUT ${esc(symbol)}</b> at +${level_pct}%${dryTag()}\n` +
-    `Sold ${(fraction * 100).toFixed(0)}% for ${fmtUsd(proceeds_usd)} · booked ${fmtSigned(booked_usd, '$')}`,
+    `Sold ${fmtInt(fraction * 100)}% for ${fmtUsd(proceeds_usd)} · booked ${fmtSigned(booked_usd, '$')}`,
     { silent: true }
   );
 }
@@ -447,7 +449,7 @@ export async function exit({ symbol, realized_pnl_pct, realized_pnl_usd, reason,
       `${fmtSigned(realized_pnl_pct, '', '%')} (${fmtSigned(realized_pnl_usd, '$')})${dryTag()}`,
     `Why: ${esc(humanReason(reason))} · peak ${fmtSigned(peak_pnl_pct, '', '%')}`,
     `Held ${fmtDuration(hold_ms)}` +
-      (exit_quality != null ? ` · kept ${(exit_quality * 100).toFixed(0)}% of peak gain` : ''),
+      (exit_quality != null ? ` · kept ${fmtInt(exit_quality * 100)}% of peak gain` : ''),
     `Today: ${fmtSigned(day.realized_pnl_usd, '$')} (${day.wins}W / ${day.losses}L)`,
   ];
   if (close.cooldown_until) {
@@ -512,7 +514,25 @@ export async function profitTarget({ pct }) {
   );
 }
 
-export default {
+// Callers use the default export, where every function runs through
+// `guarded`: a message that fails to build (a missing field) must not
+// reject into a trade path, and must not vanish silently either — a short
+// fallback alert goes out instead.
+function guarded(name, fn) {
+  return async (...args) => {
+    try {
+      return await fn(...args);
+    } catch (err) {
+      logger.warn('alert_build_failed', { name, error: err.message });
+      return send(
+        `⚠️ <b>okx-bot</b>: the "${name}" alert could not be built ` +
+        `(<code>${esc(clip(err.message))}</code>) — see the logs.`
+      );
+    }
+  };
+}
+
+const catalog = {
   send,
   tickResult,
   dailyReport,
@@ -534,3 +554,7 @@ export default {
   normal,
   profitTarget,
 };
+
+export default Object.fromEntries(
+  Object.entries(catalog).map(([name, fn]) => [name, guarded(name, fn)])
+);
