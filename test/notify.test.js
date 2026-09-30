@@ -289,6 +289,8 @@ test('throttle: a network error does not use up the slot (DNS down after a reboo
 
 // ─── Tick health (blind detector) ─────────────────────────────────────────
 
+// The BLIND tests share one module state, including the 30-min BLIND
+// window: keep the t0 values of BLIND-sending tests at least 30 min apart.
 test('tickResult: the 5th consecutive failure alerts once (loud), recovery once (silent)', async () => {
   const t0 = Date.parse('2026-09-30T10:00:00Z');
   await notify.tickResult(true, null, t0);   // clean slate
@@ -779,4 +781,49 @@ test('default export: a non-Error throw still gives a fallback, throttled per bu
   await notify.default.untracked(bad);
   assert.equal(calls.length, 1, 'fallback throttled per builder');
   assert.match(calls[0].body.text, /the "untracked" alert could not be built \(<code>plain string<\/code>\)/);
+});
+
+test('tickResult: a clock stepped back does not stretch the BLIND window', async () => {
+  const t0 = Date.parse('2026-09-30T18:00:00Z');
+  await notify.tickResult(true, null, t0);
+  for (let i = 0; i < 5; i++) await notify.tickResult(false, 'x', t0);   // BLIND at 18:00
+  assert.equal(calls.length, 1);
+  await notify.tickResult(true, null, t0 + 60_000);                        // recovered
+  const back = t0 - 2 * 3600_000;                                         // NTP stepped back 2 h
+  for (let i = 0; i < 5; i++) await notify.tickResult(false, 'x', back);
+  assert.equal(calls.length, 3, 'BLIND again on the 5th failure, not ~2.5 h later');
+  await notify.tickResult(true, null, back + 60_000);                      // clean slate
+});
+
+test('clip removes an invisible character spliced into a secret before matching it', () => {
+  const zw = String.fromCharCode(0x200b);   // zero-width space
+  process.env.OKX_SECRET_KEY = 'super-secret-value-123';
+  try {
+    const s = notify.clip(`a super-secret${zw}-value-123 and bot12345${zw}6789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw`);
+    assert.doesNotMatch(s, /super-secret|AAHdq/);
+    assert.equal(s, 'a [redacted] and bot[redacted]');
+  } finally {
+    delete process.env.OKX_SECRET_KEY;
+  }
+});
+
+test('a successful start clears only "can\'t start" throttles', async () => {
+  seedSent({ 'crash:boom': Date.now() - 1000, 'cannot_start:x': Date.now() - 1000 });
+  await notify.started({ portfolio_usd: 1, open_positions: 0 });
+  const saved = JSON.parse(fs.readFileSync(sentFile, 'utf-8'));
+  assert.equal(typeof saved['crash:boom'], 'number');
+  assert.equal(saved['cannot_start:x'], undefined);
+});
+
+test('crash keys ignore long ids too', async () => {
+  await notify.crashed('order 4Nd1mBQtrMJVYVfKf2PJy9NZUtM9ifhWfH2FqPk9mG3u failed');
+  await notify.crashed('order 7Xe2nCRusNKWZWgLg3QKz8PAVuN8jgiXgH3GrQm8nH4v failed');
+  assert.equal(calls.length, 1);
+});
+
+test('clip cuts before splitting into code points', (t) => {
+  const from = t.mock.method(Array, 'from');   // spy, calls the real Array.from
+  notify.clip('x'.repeat(100_000));
+  assert.ok(from.mock.calls.length > 0);
+  assert.ok(from.mock.calls.every(c => String(c.arguments[0]).length <= 1200));
 });

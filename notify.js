@@ -32,17 +32,18 @@ export function esc(v) {
   return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Credentials this process holds (OKX keys, the Telegram token) must never
+// Credentials this process holds (OKX API keys when set in .env, the Telegram token) must never
 // be echoed into Telegram by some CLI error text: Telegram history is cloud
-// storage. Also drops control and bidi-override characters.
+// storage. Also drops control and invisible format characters (Unicode Cf).
 const SECRET_ENV = /KEY|SECRET|TOKEN|PASSPHRASE|PASSWORD/i;
 function scrub(s) {
+  // Strip first: an invisible character spliced into a secret would
+  // otherwise dodge both matchers below and be rejoined afterwards.
+  s = s.replace(/[\u0000-\u0008\u000b-\u001f\u007f]|\p{Cf}/gu, '');
   for (const [k, v] of Object.entries(process.env)) {
     if (SECRET_ENV.test(k) && typeof v === 'string' && v.length >= 8) s = s.split(v).join('[redacted]');
   }
-  return s
-    .replace(/bot\d{6,}:[\w-]{20,}/g, 'bot[redacted]')
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, '');
+  return s.replace(/bot\d{6,}:[\w-]{20,}/g, 'bot[redacted]');
 }
 
 export function clip(v, n = MAX_DYNAMIC_CHARS) {
@@ -321,7 +322,7 @@ export async function tickResult(ok, error = null, now = Date.now()) {
   if (health.streak >= BLIND_AFTER_TICKS && !health.alerted) {
     // Flapping: blind again soon after a BLIND went out. Stay quiet until the
     // window passes; a streak that is still running then alerts.
-    if (health.lastBlindAt !== null && now - health.lastBlindAt < BLIND_REPEAT_MS) return;
+    if (health.lastBlindAt !== null && now >= health.lastBlindAt && now - health.lastBlindAt < BLIND_REPEAT_MS) return;
     health.alerted = true;   // before the await: an overlapping call can't double-send
     const delivered = await send(
       `🚨 <b>okx-bot BLIND</b> — ${health.streak} ticks failed in a row (${fmtDuration(now - health.streakSince)})\n` +

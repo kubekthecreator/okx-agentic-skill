@@ -60,3 +60,11 @@ test('alerts still reach Telegram when the log dir is unusable', async (t) => {
     delete process.env.TELEGRAM_CHAT_ID;
   }
 });
+
+test('data that fights the entry (own ts, throwing getter, bad toJSON) never makes logging throw', (t) => {
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'error', () => {});
+  assert.doesNotThrow(() => logger.info('x', { ts: 123 }));
+  assert.doesNotThrow(() => logger.info('x', { get boom() { throw new Error('getter'); } }));
+  assert.doesNotThrow(() => logger.info('x', { toJSON() { throw null; } }));
+});

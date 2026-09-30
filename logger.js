@@ -31,7 +31,7 @@ let fileLogBroken = false;
 function fileLogFailed(err) {
   if (fileLogBroken) return;
   fileLogBroken = true;
-  console.error(`[logger] file log disabled: ${err.message}`);
+  console.error(`[logger] file log disabled: ${err?.message ?? String(err)}`);
 }
 
 function ensureLogDir() {
@@ -53,6 +53,7 @@ function getLogStream() {
       path.join(LOG_DIR, `bot-${today}.log`),
       { flags: 'a' }
     );
+    fileLogBroken = false;   // each new stream gets its own one-time notice
     // Without a listener, ENOSPC/EACCES on the file would be an uncaughtException.
     logStream.on('error', fileLogFailed);
   }
@@ -63,35 +64,37 @@ export function setLogLevel(level) {
   currentLogLevel = LEVELS[level] ?? LEVELS.info;
 }
 
+// Never throws, whatever the data: alert delivery (notify.js) logs through
+// here, so a logging failure must not take the caller down.
 function log(level, message, data = {}) {
-  if (LEVELS[level] < currentLogLevel) return;
-
-  const d = data ?? {};
-  const entry = {
-    ts: new Date().toISOString(),
-    level,
-    msg: message,
-    ...d,
-  };
-
-  // File: structured JSON, best effort (see fileLogFailed).
   try {
-    getLogStream().write(JSON.stringify(entry) + '\n');
-  } catch (err) {
-    fileLogFailed(err);
-  }
+    if (LEVELS[level] < currentLogLevel) return;
 
-  // Console: human readable
-  const color = COLORS[level] || '';
-  const reset = COLORS.reset;
-  const prefix = `${color}[${entry.ts.slice(11, 19)} ${level.toUpperCase()}]${reset}`;
-  let dataStr = '';
-  try {
-    dataStr = Object.keys(d).length ? ' ' + JSON.stringify(d) : '';
+    const ts = new Date().toISOString();
+    let line;
+    let dataStr = '';
+    try {
+      const d = data ?? {};
+      line = JSON.stringify({ ts, level, msg: message, ...d });
+      dataStr = Object.keys(d).length ? ' ' + JSON.stringify(d) : '';
+    } catch {
+      line = JSON.stringify({ ts, level, msg: message, data: '[unserializable]' });
+      dataStr = ' [unserializable data]';
+    }
+
+    // File: structured JSON, best effort (see fileLogFailed).
+    try {
+      getLogStream().write(line + '\n');
+    } catch (err) {
+      fileLogFailed(err);
+    }
+
+    // Console: human readable
+    const color = COLORS[level] || '';
+    console.log(`${color}[${ts.slice(11, 19)} ${String(level).toUpperCase()}]${COLORS.reset} ${message}${dataStr}`);
   } catch {
-    dataStr = ' [unserializable data]';
+    /* logging must never throw */
   }
-  console.log(`${prefix} ${message}${dataStr}`);
 }
 
 export const logger = {
