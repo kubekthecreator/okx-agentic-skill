@@ -8,7 +8,8 @@ import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { logger, alert, setLogLevel } from './logger.js';
+import { logger, setLogLevel } from './logger.js';
+import notify from './notify.js';
 import state from './state.js';
 import risk from './risk.js';
 import strategy from './strategy.js';
@@ -19,6 +20,7 @@ const execFileP = promisify(execFile);
 const TICK_INTERVAL_MS = parseInt(process.env.TICK_INTERVAL_MS || '60000', 10);
 const KILL_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const HOLDER_SNAPSHOT_INTERVAL_MS = 60 * 60 * 1000;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 const TOKENS = JSON.parse(
   fs.readFileSync(path.join(process.cwd(), 'tokens.json'), 'utf-8')
@@ -27,25 +29,35 @@ const TOKENS = JSON.parse(
 setLogLevel(process.env.LOG_LEVEL || 'info');
 
 // ─── Pre-flight ────────────────────────────────────────────────────────────
+//
+// Every startup failure alerts before exiting. Docker restarts the bot in a
+// loop, and without an alert that loop is silent (21→22 Sep 2026 it went
+// unnoticed for about a day). notify throttles each kind to once per 6h.
 
 async function preflightConfig() {
   const cli = process.env.ONCHAINOS_CLI || 'onchainos';
+  let parsed;
   try {
     const { stdout } = await execFileP(cli, ['wallet', 'status'], { timeout: 10_000, windowsHide: true });
-    const parsed = JSON.parse(stdout);
-    if (!parsed?.data?.loggedIn) {
-      console.error(`\n❌ onchainos CLI is not logged in.\nRun: \`onchainos wallet login <email>\` (or set up API Key login per dev-portal docs).\n`);
-      process.exit(1);
-    }
-    logger.info('cli_auth_ok', {
-      loginType: parsed.data.loginType,
-      account: parsed.data.currentAccountName,
-    });
+    parsed = JSON.parse(stdout);
   } catch (err) {
     logger.error('preflight_cli_failed', { error: err.message });
     console.error(`\n❌ Could not run \`${cli} wallet status\`. Is the onchainos CLI installed and on PATH?\n${err.message}\n`);
+    await notify.cannotStart('cli_unrunnable', `can't run the onchainos CLI (${err.message})`,
+      'check the CLI binary and its mount (deploy/README.md, Troubleshooting)');
     process.exit(1);
   }
+  if (!parsed?.data?.loggedIn) {
+    logger.error('preflight_not_logged_in');
+    console.error(`\n❌ onchainos CLI is not logged in.\nRun: \`onchainos wallet login <email>\` (or set up API Key login per dev-portal docs).\n`);
+    await notify.cannotStart('cli_not_logged_in', 'the onchainos CLI is not logged in',
+      're-login the CLI for the bot (deploy/README.md, step 3)');
+    process.exit(1);
+  }
+  logger.info('cli_auth_ok', {
+    loginType: parsed.data.loginType,
+    account: parsed.data.currentAccountName,
+  });
 }
 
 function printBanner() {
@@ -80,8 +92,11 @@ async function tick() {
     const portfolio_usd = execution.portfolioValueFromBalances(balances);
     const cash_usd = execution.cashFromBalances(balances);
 
-    // Rotate daily stats if needed
-    state.rotateDaily(portfolio_usd);
+    // Rotate daily stats if needed. The ended day is reported from its own
+    // numbers — v0.2 read state.daily from a separate timer and, about half
+    // the time, after this rotation had already reset it.
+    const endedDay = state.rotateDaily(portfolio_usd);
+    if (endedDay) sendPeriodicReports(endedDay, portfolio_usd);
 
     // Evaluate state machine
     const stateInfo = risk.evaluateState(portfolio_usd);
@@ -104,15 +119,50 @@ async function tick() {
     });
 
     // Scan for new entries
-    await strategy.evaluateNewEntries({
+    const scan = await strategy.evaluateNewEntries({
       tokens: TOKENS.tokens,
       baseToken: TOKENS.base_token,
       referenceMint: TOKENS.reference_token.mint,
       portfolio_usd,
       cash_usd,
     });
+    // No candles for any token = the market-data source is down (e.g. an
+    // exhausted Market API quota): the bot is blind even though nothing threw.
+    if (scan.evaluated > 0 && scan.withData === 0) {
+      throw new Error(`no market data: 0 of ${scan.evaluated} tokens returned candles`);
+    }
+    await notify.tickResult(true);
   } catch (err) {
     logger.error('tick_failed', { tick: tickCount, error: err.message, stack: err.stack });
+    await notify.tickResult(false, err.message);
+  }
+}
+
+// Daily report for the day that just ended (sent only if something happened)
+// and, on the Monday rollover, the weekly heartbeat. Fire-and-forget: reports
+// must never delay or break a tick.
+function sendPeriodicReports(endedDay, portfolio_usd) {
+  const s = state.loadState();
+  const now = Date.now();
+  const open_positions = Object.values(s.positions).map(p => ({
+    symbol: p.token.symbol,
+    pnl_pct: strategy.getLastMark(p.id),
+    held_ms: now - new Date(p.entry_ts).getTime(),
+  }));
+  notify.dailyReport({ day: endedDay, portfolio_usd, open_positions })
+    .catch(err => logger.error('daily_report_failed', { error: err.message }));
+
+  if (new Date(now).getUTCDay() === 1) {
+    const week = s.history.filter(t => now - new Date(t.exit_ts).getTime() <= WEEK_MS);
+    notify.weeklyHeartbeat({
+      portfolio_usd,
+      week: {
+        trades: week.length,
+        wins: week.filter(t => t.realized_pnl_usd > 0).length,
+        pnl_usd: week.reduce((acc, t) => acc + t.realized_pnl_usd, 0),
+      },
+      funnel: strategy.takeFunnel(),
+    }).catch(err => logger.error('weekly_heartbeat_failed', { error: err.message }));
   }
 }
 
@@ -161,51 +211,13 @@ async function killCheckRunner() {
   if (!isShuttingDown) setTimeout(killCheckRunner, KILL_CHECK_INTERVAL_MS);
 }
 
-// previousDate: the UTC date we're summarising (the one that just ended).
-// When omitted, falls back to the daily-stats date currently in state.
-async function dailySummary(previousDate) {
-  const s = state.loadState();
-  const winRate = s.daily.trades > 0 ? (s.daily.wins / s.daily.trades) * 100 : 0;
-  await alert(
-    `📊 *Daily summary ${previousDate || s.daily.date}*\n` +
-    `Trades: ${s.daily.trades} (${s.daily.wins}W / ${s.daily.losses}L, ${winRate.toFixed(0)}% WR)\n` +
-    `Realized PnL: $${s.daily.realized_pnl_usd.toFixed(2)}\n` +
-    `State: ${s.machine_state}`,
-    { silent: true }
-  );
-}
-
-// Trigger daily summary once per UTC day. The previous version only fired
-// during the 00:00 UTC hour, which silently skipped the report whenever the
-// bot was started later in the day. Now we persist last_summary_date in
-// state and fire whenever the date has rolled over since the last send.
-function checkDailySummary() {
-  const s = state.loadState();
-  const today = new Date().toISOString().slice(0, 10);
-  // First run after startup: anchor to today without emitting a report for
-  // an unknown prior day.
-  if (!s.last_summary_date) {
-    s.last_summary_date = today;
-    state.saveState();
-    return;
-  }
-  if (s.last_summary_date !== today) {
-    const previous = s.last_summary_date;
-    s.last_summary_date = today;
-    state.saveState();
-    dailySummary(previous).catch(err =>
-      logger.error('daily_summary_failed', { previous, error: err.message })
-    );
-  }
-}
-
 // ─── Lifecycle ─────────────────────────────────────────────────────────────
 
 async function shutdown(signal) {
   if (isShuttingDown) return;
   isShuttingDown = true;
   logger.info('shutdown_initiated', { signal });
-  await alert(`⏹️ Bot shutting down: ${signal}\nOpen positions left intact for next start.`);
+  await notify.stopped({ signal, open_positions: state.getOpenPositions().length });
   state.saveState();
   // Flush the log stream so the last few lines (including this shutdown
   // sequence) hit disk before exit. Without this they can be lost on a
@@ -223,14 +235,14 @@ process.on('unhandledRejection', (err) => {
   const msg = err && err.message ? err.message : String(err);
   const stack = err && err.stack ? err.stack : '';
   logger.error('unhandled_rejection', { error: msg, stack });
-  alert(`🔥 *Unhandled rejection*\n\`${msg}\``).catch(() => {});
+  notify.unhandled(msg).catch(() => {});
 });
 
 process.on('uncaughtException', (err) => {
   // Same idea, plus we don't trust the process state anymore — let systemd /
   // docker restart us cleanly.
   logger.error('uncaught_exception', { error: err.message, stack: err.stack });
-  alert(`🔥 *Uncaught exception — restarting*\n\`${err.message}\``)
+  notify.crashed(err.message)
     .catch(() => {})
     .finally(() => process.exit(1));
 });
@@ -254,6 +266,8 @@ async function main() {
     } catch (err2) {
       logger.error('startup_balance_failed', { error: err2.message });
       console.error(`\n❌ Could not read wallet balance twice in a row.\nRun \`onchainos wallet balance --chain solana\` manually to debug.\n${err2.message}\n`);
+      await notify.cannotStart('balance_unreadable', `can't read the wallet balance (${err2.message})`,
+        'run `onchainos wallet balance --chain solana` on the VPS to see why');
       process.exit(1);
     }
   }
@@ -264,7 +278,7 @@ async function main() {
     state.saveState();
   }
 
-  await alert(`🚀 Bot started\nMode: ${process.env.DRY_RUN === 'false' ? 'LIVE' : 'DRY RUN'}\nPortfolio: $${startingPortfolio.toFixed(2)}`);
+  await notify.started({ portfolio_usd: startingPortfolio, open_positions: Object.keys(s.positions).length });
 
   // Self-rescheduling loops — no setInterval, no overlap.
   // Holder snapshots first so the very first tick already has a data point.
@@ -272,10 +286,10 @@ async function main() {
   tickRunner();
   setTimeout(killCheckRunner, KILL_CHECK_INTERVAL_MS);
   setTimeout(holderSnapshotRunner, HOLDER_SNAPSHOT_INTERVAL_MS);
-  setInterval(checkDailySummary, 60_000);  // pure clock check, no IO; safe
 }
 
-main().catch(err => {
+main().catch(async err => {
   logger.error('main_failed', { error: err.message, stack: err.stack });
+  await notify.cannotStart('startup_crash', `startup crashed: ${err.message}`, 'see `docker logs okx-bot`');
   process.exit(1);
 });

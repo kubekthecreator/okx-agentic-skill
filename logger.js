@@ -1,9 +1,9 @@
-// logger.js — structured logging with Telegram alerts
+// logger.js — structured logging.
 //
 // Every decision the bot makes goes through here. Logs go to:
 //   1. Console (colored, human-readable)
 //   2. logs/bot-YYYY-MM-DD.log (structured JSON, one line per event)
-//   3. Telegram (for material events only — entries, exits, state changes)
+// Telegram alerts live in notify.js.
 //
 // The JSON log is the source of truth — sufficient to replay every decision.
 
@@ -86,66 +86,5 @@ export const logger = {
     } catch (_) { /* ignore */ }
   },
 };
-
-// ─── Telegram ──────────────────────────────────────────────────────────────
-
-const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TG_CHAT = process.env.TELEGRAM_CHAT_ID;
-
-const TELEGRAM_TIMEOUT_MS = 5_000;
-
-export async function alert(message, opts = {}) {
-  // Always log
-  logger.info('alert', { message, ...opts });
-
-  if (!TG_TOKEN || !TG_CHAT) return;
-
-  // Bound the fetch so a stalled Telegram API (or DNS) can never block a
-  // tick. Strategy decisions don't depend on alert delivery succeeding.
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), TELEGRAM_TIMEOUT_MS);
-
-  try {
-    const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
-    const body = {
-      chat_id: TG_CHAT,
-      text: message,
-      parse_mode: 'Markdown',
-      disable_notification: opts.silent || false,
-    };
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      logger.warn('telegram_send_failed', { status: res.status });
-    }
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      logger.warn('telegram_timeout', { timeout_ms: TELEGRAM_TIMEOUT_MS });
-    } else {
-      logger.warn('telegram_error', { error: err.message });
-    }
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// Material-decision alert.
-//
-// Intent: surface large / risky entries to the operator BEFORE they execute,
-// even though v0.1 cannot poll Telegram for a STOP reply. The honest framing
-// is "you're being notified", not "you have 2 minutes to cancel" (which the
-// previous wording falsely implied).
-//
-// Returns false unconditionally — the strategy treats the lack of veto as
-// "proceed", which is intentional so the bot doesn't stall when the operator
-// is asleep. Polling getUpdates for an actual STOP reply is a roadmap item.
-export async function alertWithVeto(message) {
-  await alert(`⏸️ *Material decision* ${message}\n\n_v0.1 alerts but does not poll for replies; trade proceeds._`);
-  return false;
-}
 
 export default logger;
