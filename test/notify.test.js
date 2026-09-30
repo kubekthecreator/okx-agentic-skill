@@ -827,3 +827,14 @@ test('clip cuts before splitting into code points', (t) => {
   assert.ok(from.mock.calls.length > 0);
   assert.ok(from.mock.calls.every(c => String(c.arguments[0]).length <= 1200));
 });
+
+test('a secret that itself contains an invisible character is still redacted', () => {
+  const zw = String.fromCharCode(0x200b);   // zero-width space inside the secret
+  process.env.OKX_SECRET_KEY = `abc${zw}defghij-1234`;
+  try {
+    assert.equal(notify.clip(`auth failed for key abc${zw}defghij-1234 end`), 'auth failed for key [redacted] end');
+    assert.equal(notify.clip('auth failed for key abcdefghij-1234 end'), 'auth failed for key [redacted] end');
+  } finally {
+    delete process.env.OKX_SECRET_KEY;
+  }
+});

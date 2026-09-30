@@ -36,12 +36,18 @@ export function esc(v) {
 // be echoed into Telegram by some CLI error text: Telegram history is cloud
 // storage. Also drops control and invisible format characters (Unicode Cf).
 const SECRET_ENV = /KEY|SECRET|TOKEN|PASSPHRASE|PASSWORD/i;
+function stripInvisible(s) {
+  return s.replace(/[\u0000-\u0008\u000b-\u001f\u007f]|\p{Cf}/gu, '');
+}
+
 function scrub(s) {
   // Strip first: an invisible character spliced into a secret would
   // otherwise dodge both matchers below and be rejoined afterwards.
-  s = s.replace(/[\u0000-\u0008\u000b-\u001f\u007f]|\p{Cf}/gu, '');
+  s = stripInvisible(s);
   for (const [k, v] of Object.entries(process.env)) {
-    if (SECRET_ENV.test(k) && typeof v === 'string' && v.length >= 8) s = s.split(v).join('[redacted]');
+    if (!SECRET_ENV.test(k) || typeof v !== 'string') continue;
+    const needle = stripInvisible(v);   // the secret as it looks after the strip
+    if (needle.length >= 8) s = s.split(needle).join('[redacted]');
   }
   return s.replace(/bot\d{6,}:[\w-]{20,}/g, 'bot[redacted]');
 }
