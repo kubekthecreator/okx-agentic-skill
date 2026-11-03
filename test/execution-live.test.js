@@ -88,9 +88,8 @@ test('live executeSwap surfaces a failed swap execute after a single call', asyn
     ...wallet,
     'swap execute': [{ exit: 1, stdout: { ok: false, msg: 'broadcast_failed' } }],
   });
-  // Today the message is execFile's `Command failed: … swap execute …` (known bug: cli() drops the backend msg);
-  // once that is fixed it is `broadcast_failed`. Either way only the execute step can produce it.
-  await assert.rejects(execution.executeSwap(swap), /swap execute|broadcast_failed/);
+  // The backend msg; only the execute step's scenario produces it.
+  await assert.rejects(execution.executeSwap(swap), /broadcast_failed/);
   assert.equal(count('swap execute'), 1);
 });
 

@@ -77,7 +77,8 @@ async function cli(args, { timeout = 30_000, attempts = 2 } = {}) {
           }
           const msg = j.msg || j.message || `cli_code_${j.code}`;
           logger.warn('cli_error_response', { cmd: args.slice(0, 2).join(' '), code: j.code, msg, attempt });
-          throw new Error(msg);
+          // Keep execFile's error (the retry rules below read its code/killed/signal); only swap in the backend reason.
+          err.message = msg;
         } catch (parseErr) {
           if (parseErr instanceof CliConfirmingError) throw parseErr;
           // fall through to retry logic

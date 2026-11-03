@@ -229,10 +229,9 @@ test('fetchCatalysts sums smart-money signals from the last 6h and drops older o
   assert.ok(!joined().some(a => a.startsWith('token price-info')));
 });
 
-// ─── known bugs (todo: expected to fail until production code is fixed) ────
+// ─── regressions (fixed bugs) ───────────────────────────────────────────────
 
 test('cli surfaces the backend msg when the CLI exits non-zero',
-  { todo: 'bug: cli() drops the backend msg on non-zero exit (execution.js:80 is caught by its own inner catch)' },
   async (t) => {
     t.mock.method(console, 'log', () => {});
     fake.scenario({ 'wallet balance': [{ exit: 1, stdout: { ok: false, msg: 'backend_reason' } }] });
