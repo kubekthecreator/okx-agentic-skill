@@ -280,3 +280,59 @@ test('a failed signal list call does not sell the position as catalyst_death',
     assert.ok(state.getOpenPositions().some(p => p.id === pos.id), 'position must stay open');
     assert.ok(!joined().some(a => a.startsWith('swap ')), 'no swap call may be made');
   });
+
+test('a failed signal list call unconfirmed for over an hour alerts Telegram once and still does not sell',
+  async (t) => {
+    t.mock.method(console, 'log', () => {});
+    const now = Date.now();
+    fs.writeFileSync(holdersFile, JSON.stringify({ jup: [{ ts: now - 60_000, holders: 1000 }] }));
+    const kline = Array.from({ length: 6 }, (_, i) => ({
+      ts: String(now - i * H), o: '1', h: '1', l: '1', c: '1', volUsd: '1000', confirm: '1',
+    }));
+    fake.scenario({
+      'market kline': [{ stdout: { ok: true, data: kline } }],
+      'signal list': [{ exit: 1, stdout: { ok: false, msg: 'rate_limited' } }],
+      'swap quote': [{ stdout: quote({ toTokenAmount: '100000000', toToken: { decimal: '6', tokenUnitPrice: '1' } }) }],
+      'wallet balance': [{ stdout: { ok: true, data: { details: [] } } }],
+    });
+    const prior = {
+      fetch: globalThis.fetch,
+      token: process.env.TELEGRAM_BOT_TOKEN,
+      chat: process.env.TELEGRAM_CHAT_ID,
+    };
+    const telegram = [];
+    process.env.TELEGRAM_BOT_TOKEN = '123456:test';
+    process.env.TELEGRAM_CHAT_ID = '1';
+    globalThis.fetch = async (url, opts) => {
+      telegram.push({ url, body: JSON.parse(opts.body) });
+      return { ok: true, status: 200 };
+    };
+    fs.rmSync(path.join(process.env.OKX_BOT_LOG_DIR, 'alerts_sent.json'), { force: true });
+    const pos = state.openPosition({
+      token: { symbol: 'JUP', mint: 'jup', decimals: 6 },
+      entry_ts: new Date().toISOString(),
+      entry_price_usd: 1,
+      entry_amount_token: 100,
+      entry_value_usd: 100,
+      setup_id: 'smart_money',
+      kill_conditions: [{ type: 'catalyst_death', original_catalysts: ['smart_money'] }],
+      scale_out_proceeds_usd: 0,
+      scale_out_cost_usd: 0,
+      catalyst_unconfirmed_since: new Date(now - 2 * H).toISOString(),
+    });
+    try {
+      await strategy.manageOpenPositions({ baseToken: { mint: 'usdc', decimals: 6 } });
+      assert.equal(telegram.length, 1, 'exactly one Telegram message');
+      assert.match(telegram[0].url, /^https:\/\/api\.telegram\.org\/bot/);
+      assert.match(telegram[0].body.text, /catalyst check blind/);
+      assert.ok(state.getOpenPositions().some(p => p.id === pos.id), 'position must stay open');
+      assert.ok(!joined().some(a => a.startsWith('swap ')), 'no swap call may be made');
+    } finally {
+      globalThis.fetch = prior.fetch;
+      for (const [k, v] of [['TELEGRAM_BOT_TOKEN', prior.token], ['TELEGRAM_CHAT_ID', prior.chat]]) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+      delete state.loadState().positions[pos.id];
+      state.saveState();
+    }
+  });

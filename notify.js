@@ -4,8 +4,8 @@
 //
 // Tiers:
 //   loud   — act now: can't start, crashed, unhandled error, blind,
-//            exit blocked/failing, untracked position, HALTED,
-//            stopped with open positions, a message that failed to build
+//            exit blocked/failing, catalyst check blind, untracked position,
+//            HALTED, stopped with open positions, a message that failed to build
 //   normal — trades: BUY, EXIT, BUY blocked
 //   silent — FYI, no sound: started, stopped flat, recovered, scale-out,
 //            SLOW, back to NORMAL, profit target, daily report, weekly heartbeat
@@ -541,6 +541,19 @@ export async function exitFailing({ position_id, symbol, reason, pnl_pct, error 
   );
 }
 
+// The catalyst-death exit is skipped while a data source can't be read (an
+// incomplete read never sells); this says so once the skip has lasted a while.
+export async function catalystUnconfirmed({ position_id, symbol, stuck_ms, pnl_pct, hard_stop_pct }) {
+  await send(
+    `⚠️ <b>${esc(symbol)}: catalyst check blind for ${fmtDuration(stuck_ms)}</b> · now ${fmtSigned(pnl_pct, '', '%')}${dryTag()}\n` +
+    `A catalyst data source can't be read, so "catalyst gone" can't be confirmed. The bot will NOT sell on a failed read.\n` +
+    `Still protecting the position: hard stop −${esc(hard_stop_pct)}%, trailing stop, 5-day time stop. ` +
+    `Check <code>onchainos signal list</code> (login / rate limit); close manually if you think the thesis is dead.\n` +
+    `<i>Repeats at most every 6h.</i>`,
+    { key: `catalyst_unconfirmed:${position_id}`, everyMs: 6 * HOUR }
+  );
+}
+
 // ─── Risk state ────────────────────────────────────────────────────────────
 
 export async function halted({ reason, until, trailing_pct }) {
@@ -609,6 +622,7 @@ const catalog = {
   exit,
   exitBlocked,
   exitFailing,
+  catalystUnconfirmed,
   halted,
   slow,
   normal,

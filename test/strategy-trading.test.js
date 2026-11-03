@@ -81,7 +81,7 @@ function bars(close, volume = 100, n = 30) {
 // Returns the swap/fetch mocks and the recorded notify alerts.
 function setup(t, { swap = async () => ENTRY_FILL, candles = bars(1), entry = PASS, preflight = { ok: true }, catalysts = ZERO_CATALYSTS } = {}) {
   const alerts = {};
-  for (const name of ['buy', 'buyBlocked', 'untracked', 'scaleOut', 'exit', 'exitBlocked', 'exitFailing']) {
+  for (const name of ['buy', 'buyBlocked', 'untracked', 'scaleOut', 'exit', 'exitBlocked', 'exitFailing', 'catalystUnconfirmed']) {
     alerts[name] = [];
     t.mock.method(notify, name, async (a) => { alerts[name].push(a); });
   }
@@ -496,5 +496,194 @@ describe('manageOpenPositions: double-execution guards', () => {
     assert.equal(state.getOpenPositions().length, 1);
     assert.equal(state.loadState().positions[pos.id].exit_pending.reason, 'hard_stop');
     assert.equal(swapMock.mock.callCount(), 1, 'second pass is skipped by exit_pending');
+  });
+});
+
+// ─── Management: unconfirmed catalyst alert ────────────────────────────────
+//
+// An incomplete catalyst read that does not pass skips the catalyst-death
+// exit. The streak start lives on the position; past 1h the bot tells the
+// operator. None of this may ever change an exit decision.
+
+describe('manageOpenPositions: unconfirmed catalyst alert', () => {
+  const INCOMPLETE = { ...ZERO_CATALYSTS, incomplete: true };
+  const CAT_KILL = [{ type: 'catalyst_death', original_catalysts: ['smart_money'] }];
+  const minAgo = (m) => new Date(Date.now() - m * 60_000).toISOString();
+  const sinceOf = (pos) => state.loadState().positions[pos.id].catalyst_unconfirmed_since;
+  const isRecent = (iso) => Date.now() - Date.parse(iso) < 10_000 && Date.parse(iso) <= Date.now();
+
+  test('the first unconfirmed read starts the streak: field set, no alert, no sale', async (t) => {
+    const { swapMock, alerts } = setup(t, { catalysts: INCOMPLETE });
+    const pos = openPos({ kill_conditions: CAT_KILL });
+    await manage();
+
+    assert.ok(isRecent(sinceOf(pos)), `since should be a recent ISO, got ${sinceOf(pos)}`);
+    assert.equal(alerts.catalystUnconfirmed.length, 0);
+    assert.equal(swapMock.mock.callCount(), 0);
+    assert.equal(state.getOpenPositions().length, 1);
+  });
+
+  test('an unconfirmed streak past 1h alerts with the stuck time, and still never sells', async (t) => {
+    const { swapMock, alerts } = setup(t, { catalysts: INCOMPLETE, candles: bars(1.05) });   // +5%: the alert must carry the real mark
+    const since = minAgo(61);
+    const pos = openPos({ kill_conditions: CAT_KILL }, { catalyst_unconfirmed_since: since });
+    await manage();
+
+    assert.equal(alerts.catalystUnconfirmed.length, 1);
+    const a = alerts.catalystUnconfirmed[0];
+    assert.equal(a.position_id, pos.id);
+    assert.equal(a.symbol, 'JUP');
+    assert.ok(Math.abs(a.pnl_pct - 5) < 1e-6, `pnl_pct ${a.pnl_pct}`);
+    assert.equal(a.hard_stop_pct, risk.getHardStopPct());
+    assert.ok(a.stuck_ms >= 61 * 60_000 && a.stuck_ms < 61 * 60_000 + 10_000, `stuck_ms ${a.stuck_ms}`);
+    assert.equal(sinceOf(pos), since, 'alerting does not rewrite the streak start');
+    assert.equal(swapMock.mock.callCount(), 0);
+    assert.equal(state.getOpenPositions().length, 1);
+
+    // Ten hours in: still no sale, still alerting (notify throttles, not strategy).
+    state.updatePosition(pos.id, { catalyst_unconfirmed_since: minAgo(600) });
+    await manage();
+    assert.equal(alerts.catalystUnconfirmed.length, 2);
+    assert.ok(alerts.catalystUnconfirmed[1].stuck_ms >= 600 * 60_000);
+    assert.equal(swapMock.mock.callCount(), 0);
+    assert.equal(state.getOpenPositions().length, 1);
+  });
+
+  test('the threshold is 1h: just under stays quiet, just over alerts', async (t) => {
+    const { alerts } = setup(t, { catalysts: INCOMPLETE });
+    const ago = (ms) => new Date(Date.now() - ms).toISOString();
+    const pos = openPos({ kill_conditions: CAT_KILL }, { catalyst_unconfirmed_since: ago(3600_000 - 5_000) });
+    await manage();
+    assert.equal(alerts.catalystUnconfirmed.length, 0, '59m55s is under the threshold');
+
+    state.updatePosition(pos.id, { catalyst_unconfirmed_since: ago(3600_000 + 5_000) });
+    await manage();
+    assert.equal(alerts.catalystUnconfirmed.length, 1, '1h00m05s is past it');
+  });
+
+  test('state is written only when a streak starts or ends, never on steady reads', async (t) => {
+    setup(t, { catalysts: { ...ZERO_CATALYSTS, smart_money_buyers_6h: 3 } });
+    const pos = openPos({ kill_conditions: CAT_KILL });
+    const writes = t.mock.method(state, 'updatePosition');   // no stub: calls through
+    const run = async (catalysts, times = 2) => {
+      execution.fetchCatalysts.mock.mockImplementation(async () => catalysts);
+      for (let i = 0; i < times; i++) await manage();
+    };
+
+    await run({ ...ZERO_CATALYSTS, smart_money_buyers_6h: 3 });
+    assert.equal(writes.mock.callCount(), 0, 'confirmed reads with no streak write nothing');
+    await run(INCOMPLETE);
+    assert.equal(writes.mock.callCount(), 1, 'the streak start is written once, not per tick');
+    await run({ ...ZERO_CATALYSTS, smart_money_buyers_6h: 3 });
+    assert.equal(writes.mock.callCount(), 2, 'the reset is written once');
+    assert.equal(sinceOf(pos), null);
+  });
+
+  test('an unconfirmed streak under 1h neither alerts nor rewrites the streak start', async (t) => {
+    const { swapMock, alerts } = setup(t, { catalysts: INCOMPLETE });
+    const since = minAgo(30);
+    const pos = openPos({ kill_conditions: CAT_KILL }, { catalyst_unconfirmed_since: since });
+    await manage();
+
+    assert.equal(alerts.catalystUnconfirmed.length, 0);
+    assert.equal(sinceOf(pos), since);
+    assert.equal(swapMock.mock.callCount(), 0);
+  });
+
+  test('a confirming read clears the streak; a later incomplete read starts a fresh one', async (t) => {
+    const { alerts } = setup(t, { catalysts: INCOMPLETE });
+    const pos = openPos({ kill_conditions: CAT_KILL }, { catalyst_unconfirmed_since: minAgo(120) });
+
+    execution.fetchCatalysts.mock.mockImplementation(async () => ({ ...ZERO_CATALYSTS, smart_money_buyers_6h: 3 }));
+    await manage();
+    assert.equal(sinceOf(pos), null);
+    assert.equal(alerts.catalystUnconfirmed.length, 0);
+
+    execution.fetchCatalysts.mock.mockImplementation(async () => INCOMPLETE);
+    await manage();
+    assert.ok(isRecent(sinceOf(pos)), 'a fresh streak, not the 2h-old one');
+    assert.equal(alerts.catalystUnconfirmed.length, 0);
+  });
+
+  test('an incomplete read where another source passes clears the streak: no alert, no sale', async (t) => {
+    const { swapMock, alerts } = setup(t, { catalysts: { ...INCOMPLETE, smart_money_buyers_6h: 3 } });
+    const pos = openPos({ kill_conditions: CAT_KILL }, { catalyst_unconfirmed_since: minAgo(120) });
+    await manage();
+
+    assert.equal(sinceOf(pos), null);
+    assert.equal(alerts.catalystUnconfirmed.length, 0);
+    assert.equal(swapMock.mock.callCount(), 0);
+    assert.equal(state.getOpenPositions().length, 1);
+  });
+
+  test('a complete dead read still sells as catalyst_death even with a streak recorded', async (t) => {
+    const { swapMock, alerts } = setup(t, { catalysts: ZERO_CATALYSTS });
+    openPos({ kill_conditions: CAT_KILL }, { catalyst_unconfirmed_since: minAgo(120) });
+    await manage();
+
+    assert.equal(swapMock.mock.callCount(), 1);
+    assert.equal(state.loadState().history.at(-1).exit_reason, 'catalyst_death');
+    assert.equal(alerts.catalystUnconfirmed.length, 0);
+  });
+
+  for (const [label, bad] of [
+    ['an unparsable', 'not-a-date'],
+    ['a future', new Date(Date.now() + 3600_000).toISOString()],
+  ]) {
+    test(`${label} streak start is replaced by now: no alert, no crash`, async (t) => {
+      const { swapMock, alerts } = setup(t, { catalysts: INCOMPLETE });
+      const pos = openPos({ kill_conditions: CAT_KILL }, { catalyst_unconfirmed_since: bad });
+      await manage();
+
+      assert.ok(isRecent(sinceOf(pos)), `since should be rewritten to ~now, got ${sinceOf(pos)}`);
+      assert.equal(alerts.catalystUnconfirmed.length, 0);
+      assert.equal(swapMock.mock.callCount(), 0);
+      assert.equal(state.getOpenPositions().length, 1);
+    });
+  }
+
+  test('the streak start is persisted to the state file', async (t) => {
+    setup(t, { catalysts: INCOMPLETE });
+    const pos = openPos({ kill_conditions: CAT_KILL });
+    await manage();
+
+    const onDisk = JSON.parse(fs.readFileSync(process.env.OKX_BOT_STATE_FILE, 'utf-8'));
+    assert.equal(onDisk.positions[pos.id].catalyst_unconfirmed_since, sinceOf(pos));
+    assert.ok(isRecent(onDisk.positions[pos.id].catalyst_unconfirmed_since));
+  });
+
+  test('end to end with the real notify: one Telegram message for a long streak, not one per tick', async (t) => {
+    const prior = {
+      fetch: globalThis.fetch,
+      token: process.env.TELEGRAM_BOT_TOKEN,
+      chat: process.env.TELEGRAM_CHAT_ID,
+    };
+    const telegram = [];
+    process.env.TELEGRAM_BOT_TOKEN = '123456:test';
+    process.env.TELEGRAM_CHAT_ID = '1';
+    globalThis.fetch = async (url, opts) => {
+      telegram.push({ url, body: JSON.parse(opts.body) });
+      return { ok: true, status: 200 };
+    };
+    fs.rmSync(path.join(process.env.OKX_BOT_LOG_DIR, 'alerts_sent.json'), { force: true });
+    try {
+      const { swapMock } = setup(t, { catalysts: INCOMPLETE });
+      notify.catalystUnconfirmed.mock.restore();   // run the real alert, through the real throttle
+      openPos({ kill_conditions: CAT_KILL }, { catalyst_unconfirmed_since: minAgo(120) });
+      await manage();
+      await manage();
+
+      assert.equal(telegram.length, 1, 'second tick is throttled');
+      assert.match(telegram[0].url, /^https:\/\/api\.telegram\.org\/bot/);
+      assert.equal(telegram[0].body.chat_id, '1');
+      assert.match(telegram[0].body.text, /catalyst check blind for 2h/);
+      assert.equal(swapMock.mock.callCount(), 0);
+      assert.equal(state.getOpenPositions().length, 1);
+    } finally {
+      globalThis.fetch = prior.fetch;
+      for (const [k, v] of [['TELEGRAM_BOT_TOKEN', prior.token], ['TELEGRAM_CHAT_ID', prior.chat]]) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+    }
   });
 });
