@@ -293,17 +293,18 @@ Every decision is logged. Logs are structured JSON, written to
 exit reason, peak PnL during hold, exit quality, and full PnL accounting.
 
 **Daily report** on the first tick after UTC midnight, only if the day had
-trades, open positions or failed ticks: trades W/L, realized PnL, portfolio,
-open positions with their last PnL, tick health. **Weekly heartbeat** every
-Monday whatever happened: ticks and failures, portfolio, the week's trades,
-and how the entry filter rejected the week's token checks — if it stops
-arriving, the bot or the VPS is down. Set `TZ` (e.g. `Europe/Warsaw`) in
-`.env` for local times in alerts; unset means the host's zone (UTC in the
-Docker image).
+trades, open positions or failed ticks: trades W/L, realized PnL, the Solana
+wallet value and its USDC (the bot sees only its own chain, not the whole OKX
+account), open positions with their last PnL, tick health.
+**Weekly heartbeat** every Monday whatever happened: ticks and failures, the
+Solana wallet value and its USDC, the week's trades, and how the entry filter
+rejected the week's token checks — if it stops arriving, the bot or the VPS
+is down. Set `TZ` (e.g. `Europe/Warsaw`) in `.env` for local times in alerts;
+unset means the host's zone (UTC in the Docker image).
 
 **Status command.** `npm run status` prints the live state to console:
-current portfolio, open positions with PnL, state machine status, today's
-trades, next decision window.
+the Solana wallet value, open positions with PnL, state machine status,
+today's trades, next decision window.
 
 **Replay-ability.** Logs are sufficient to reconstruct every decision the
 bot made. If a trade went wrong, the log shows exactly which signals fired
@@ -528,7 +529,7 @@ The full success-path output:
 
 Flow: signal eval passes → veto alert (material-position threshold
 hit at 25% of portfolio; that separate alert was later removed and the
-BUY message now carries the share of portfolio) → quote fetched live
+BUY message now carries its share of the Solana wallet) → quote fetched live
 from OKX → dry_run_swap
 recorded with expected fill amount → BUY alert with entry price derived
 from the quote's `toToken.tokenUnitPrice` (this is the P0 #1 fix —

@@ -108,7 +108,7 @@ async function tick() {
     if (endedDay) {
       // A report must never break the tick (the rotation is already saved).
       try {
-        sendPeriodicReports(endedDay, portfolio_usd);
+        sendPeriodicReports(endedDay, portfolio_usd, cash_usd);
       } catch (err) {
         logger.error('periodic_reports_failed', { error: err.message, stack: err.stack });
       }
@@ -159,7 +159,7 @@ async function tick() {
 // Daily report for the day that just ended (sent only if something happened)
 // and, on the Monday rollover, the weekly heartbeat. Fire-and-forget: reports
 // must never delay or break a tick.
-function sendPeriodicReports(endedDay, portfolio_usd) {
+function sendPeriodicReports(endedDay, portfolio_usd, cash_usd) {
   const s = state.loadState();
   const now = Date.now();
   const open_positions = Object.values(s.positions).map(p => ({
@@ -167,12 +167,13 @@ function sendPeriodicReports(endedDay, portfolio_usd) {
     pnl_pct: strategy.getLastMark(p.id),
     held_ms: now - new Date(p.entry_ts).getTime(),
   }));
-  notify.dailyReport({ day: endedDay, portfolio_usd, open_positions })
+  notify.dailyReport({ day: endedDay, portfolio_usd, cash_usd, open_positions })
     .catch(err => logger.error('daily_report_failed', { error: err.message }));
 
   if (new Date(now).getUTCDay() === 1) {
     notify.weeklyHeartbeat({
       portfolio_usd,
+      cash_usd,
       week: state.getWeekSummary(now),
       funnel: strategy.takeFunnel(),
     }).catch(err => logger.error('weekly_heartbeat_failed', { error: err.message }));
@@ -281,14 +282,14 @@ async function main() {
   // Initialize starting portfolio for daily PnL accounting.
   // Hard-fail on persistent balance errors — without a real number here, all
   // daily PnL guards in risk.js divide by zero and silently disable themselves.
-  let startingPortfolio;
+  let balances;
   try {
-    startingPortfolio = await execution.getPortfolioValueUsd();
+    balances = await execution.fetchBalances();
   } catch (err) {
     logger.warn('startup_balance_failed_retrying', { error: err.message });
     await new Promise(r => setTimeout(r, 5000));
     try {
-      startingPortfolio = await execution.getPortfolioValueUsd();
+      balances = await execution.fetchBalances();
     } catch (err2) {
       logger.error('startup_balance_failed', { error: err2.message });
       console.error(`\n❌ Could not read wallet balance twice in a row.\nRun \`onchainos wallet balance --chain solana\` manually to debug.\n${err2.message}\n`);
@@ -297,6 +298,8 @@ async function main() {
       process.exit(1);
     }
   }
+  const startingPortfolio = execution.portfolioValueFromBalances(balances);
+  const startingCash = execution.cashFromBalances(balances);
 
   const s = state.loadState();
   if (s.daily.starting_portfolio_usd === 0) {
@@ -304,7 +307,7 @@ async function main() {
     state.saveState();
   }
 
-  await notify.started({ portfolio_usd: startingPortfolio, open_positions: Object.keys(s.positions).length });
+  await notify.started({ portfolio_usd: startingPortfolio, cash_usd: startingCash, open_positions: Object.keys(s.positions).length });
 
   // Self-rescheduling loops — no setInterval, no overlap.
   // Holder snapshots first so the very first tick already has a data point.

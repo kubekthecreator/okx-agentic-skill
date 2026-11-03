@@ -160,12 +160,12 @@ The other messages are one-off events and are not throttled.
 
 | Function | Tier | Content |
 |---|---|---|
-| `started({portfolio_usd, open_positions})` | silent | mode, portfolio, open positions |
+| `started({portfolio_usd, cash_usd, open_positions})` | silent | mode, Solana wallet value incl. USDC, open positions |
 | `stopped({signal, open_positions})` | silent if 0, loud if >0 | signal; with positions: "stops are NOT enforced until it runs again" |
 | `crashed(message)` / `unhandled(message)` | loud, throttled | message |
 | `cannotStart(id, reason, hint)` | loud, 6 h | reason, "Docker keeps restarting it; nothing is traded or managed", fix hint |
 | `tickResult(ok, error)` | loud BLIND / silent recovered | streak, duration, last error |
-| `buy({...})` | normal | size $ + % of portfolio, entry price, setup in words, exit plan (stop price at −hard%, trail %, scale-out levels), tx |
+| `buy({...})` | normal | size $ + % of the Solana wallet, entry price, setup in words, exit plan (stop price at −hard%, trail %, scale-out levels), tx |
 | `buyBlocked({...})` | normal, 6 h | CLI message, next step, "bot will not force it" |
 | `untracked({...})` | loud | swap fired but entry price unknown; stops NOT managed; close manually |
 | `scaleOut({...})` | silent | level, % sold, proceeds, booked PnL |
@@ -175,8 +175,10 @@ The other messages are one-off events and are not throttled.
 | `halted({reason, until, trailing_pct})` | loud | reason in words, until (local time), tighter trail, then Slow |
 | `slow({reason})` / `normal()` | silent | reason in words |
 | `profitTarget({pct})` | silent | "no new entries until 00:00 UTC (local time)" |
-| `dailyReport({day, portfolio_usd, open_positions})` | silent | **only if** the day had trades, open positions, or failed ticks. Content: trades W/L, realized PnL, portfolio (delta vs day start in LIVE only), open positions with last PnL % and hold time, ticks/failed |
-| `weeklyHeartbeat({portfolio_usd, week, funnel})` | silent | sent every Monday rotation regardless of activity: since, ticks/failed, portfolio, trades this week, "why no entries" funnel counts |
+| `dailyReport({day, portfolio_usd, cash_usd, open_positions})` | silent | **only if** the day had trades, open positions, or failed ticks. Content: trades W/L, realized PnL, Solana wallet value incl. USDC (delta vs day start in LIVE only), open positions with last PnL % and hold time, ticks/failed |
+| `weeklyHeartbeat({portfolio_usd, cash_usd, week, funnel})` | silent | sent every Monday rotation regardless of activity: since, ticks/failed, Solana wallet value incl. USDC, trades this week, "why no entries" funnel counts |
+
+The bot sees only its own chain (OKX_CHAIN=solana) of the shared OKX account, so messages say "Solana wallet", never "portfolio" (changed 2026-10-01).
 
 ### Removed
 

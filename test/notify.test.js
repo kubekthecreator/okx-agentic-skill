@@ -384,6 +384,7 @@ test('dailyReport: an active day is reported silently from the ended day', async
   await notify.dailyReport({
     day: { ...quietDay, trades: 2, wins: 1, losses: 1, realized_pnl_usd: 0.84 },
     portfolio_usd: 10.52,
+    cash_usd: 4.47,
     open_positions: [{ symbol: 'JUP', pnl_pct: 3.2, held_ms: 5 * 3600_000 }],
   });
   assert.equal(calls.length, 1);
@@ -391,7 +392,8 @@ test('dailyReport: an active day is reported silently from the ended day', async
   assert.equal(disable_notification, true);
   assert.match(text, /Day 2026-09-29<\/b> \(UTC\) · DRY RUN/);
   assert.match(text, /Trades 2 \(1W \/ 1L\) · realized \+\$0\.84/);
-  assert.match(text, /Portfolio \$10\.52\n/, 'DRY RUN shows no wallet delta');
+  assert.match(text, /Solana wallet \$10\.52 \(incl\. USDC \$4\.47\)\n/, 'DRY RUN shows no wallet delta');
+  assert.doesNotMatch(text, /portfolio/i);
   assert.match(text, /Open: JUP \+3\.20% \(held 5h\)/);
   assert.match(text, /Health: 1 ticks, 0 failed/);
 });
@@ -412,9 +414,11 @@ test('dailyReport: LIVE shows the wallet change since day start', async () => {
     await notify.dailyReport({
       day: { ...quietDay, trades: 1, wins: 1, realized_pnl_usd: 0.5 },
       portfolio_usd: 10.18,
+      cash_usd: 4.47,
       open_positions: [],
     });
-    assert.match(calls[0].body.text, /Portfolio \$10\.18 \(\+\$0\.50 since day start\)/);
+    assert.match(calls[0].body.text, /Solana wallet \$10\.18 \(incl\. USDC \$4\.47\) · \+\$0\.50 since day start/);
+    assert.doesNotMatch(calls[0].body.text, /portfolio/i);
   } finally {
     process.env.DRY_RUN = 'true';
   }
@@ -423,6 +427,7 @@ test('dailyReport: LIVE shows the wallet change since day start', async () => {
 test('weeklyHeartbeat: always sent, silent, with the entry-filter breakdown', async () => {
   await notify.weeklyHeartbeat({
     portfolio_usd: 9.68,
+    cash_usd: 4.47,
     week: { trades: 0, wins: 0, pnl_usd: 0 },
     funnel: { checked: 1000, trend_failed: 700, momentum_failed: 250, no_data: 50 },
   });
@@ -430,7 +435,8 @@ test('weeklyHeartbeat: always sent, silent, with the entry-filter breakdown', as
   const { text, disable_notification } = calls[0].body;
   assert.equal(disable_notification, true);
   assert.match(text, /okx-bot weekly<\/b> · DRY RUN · since /);
-  assert.match(text, /portfolio \$9\.68/);
+  assert.match(text, /Solana wallet \$9\.68 \(incl\. USDC \$4\.47\)/);
+  assert.doesNotMatch(text, /portfolio/i);
   assert.match(text, /Trades 0 \(0W \/ 0L\)/);
   assert.match(text, /1,000 token checks: trend ✗ 700 · momentum ✗ 250 · no candles 50/);
 });
@@ -492,11 +498,12 @@ test('send reports whether the alert was handled', async () => {
 // ─── Lifecycle ────────────────────────────────────────────────────────────
 
 test('started is silent; stopped is silent when flat and loud with open positions', async () => {
-  await notify.started({ portfolio_usd: 9.68, open_positions: 0 });
+  await notify.started({ portfolio_usd: 9.68, cash_usd: 4.47, open_positions: 0 });
   await notify.stopped({ signal: 'SIGTERM', open_positions: 0 });
   await notify.stopped({ signal: 'SIGTERM', open_positions: 2 });
   assert.deepEqual(calls.map(c => c.body.disable_notification), [true, true, false]);
-  assert.match(calls[0].body.text, /okx-bot started<\/b> · DRY RUN\nPortfolio \$9\.68 · open positions 0/);
+  assert.match(calls[0].body.text, /okx-bot started<\/b> · DRY RUN\nSolana wallet \$9\.68 \(incl\. USDC \$4\.47\) · open positions 0/);
+  assert.doesNotMatch(calls[0].body.text, /portfolio/i);
   assert.match(calls[2].body.text, /2 open positions — stops are NOT enforced until it runs again/);
 });
 
@@ -522,7 +529,7 @@ test('crashed and unhandled are loud and throttled per message', async () => {
 
 // ─── Trades ───────────────────────────────────────────────────────────────
 
-test('buy: size, share of portfolio, readable price, setup and exit plan; DRY run shows no tx', async () => {
+test('buy: size, share of the Solana wallet, readable price, setup and exit plan; DRY run shows no tx', async () => {
   await notify.buy({
     symbol: 'BONK', size_usd: 12.4, pct_of_portfolio: 25, entry_price_usd: 0.0000213456,
     setup_id: 'smart_money__rs', hard_stop_pct: 10, trailing_pct: 8, scale_out_pcts: [15, 30, 50],
@@ -530,7 +537,8 @@ test('buy: size, share of portfolio, readable price, setup and exit plan; DRY ru
   });
   const { text, disable_notification } = calls[0].body;
   assert.equal(disable_notification, false);
-  assert.match(text, /BUY BONK<\/b> \$12\.40 \(25% of portfolio\) · DRY/);
+  assert.match(text, /BUY BONK<\/b> \$12\.40 \(25% of Solana wallet\) · DRY/);
+  assert.doesNotMatch(text, /portfolio/i);
   assert.match(text, /Entry \$0\.00002135 · setup: smart money · RS boost/);
   assert.match(text, /stop \$0\.00001921 \(−10%\) · trail 8% · scale-outs at \+15%\/\+30%\/\+50%/);
   assert.doesNotMatch(text, /Solscan|tx:/);
