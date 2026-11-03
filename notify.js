@@ -37,6 +37,7 @@ export function esc(v) {
 // storage. Also drops control and invisible format characters (Unicode Cf).
 const SECRET_ENV = /KEY|SECRET|TOKEN|PASSPHRASE|PASSWORD/i;
 function stripInvisible(s) {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters is the purpose
   return s.replace(/[\u0000-\u0008\u000b-\u001f\u007f]|\p{Cf}/gu, '');
 }
 
@@ -116,9 +117,10 @@ const REASONS = {
 
 export function humanReason(code) {
   if (Object.hasOwn(REASONS, code)) return REASONS[code];
-  let m;
-  if ((m = /^trailing_stop_(\d+)pct$/.exec(code))) return `trailing stop (−${m[1]}% from peak)`;
-  if ((m = /^volume_collapse_(\d+)pct$/.exec(code))) return `volume collapsed ${m[1]}% vs entry bar`;
+  const trail = /^trailing_stop_(\d+)pct$/.exec(code);
+  if (trail) return `trailing stop (−${trail[1]}% from peak)`;
+  const vol = /^volume_collapse_(\d+)pct$/.exec(code);
+  if (vol) return `volume collapsed ${vol[1]}% vs entry bar`;
   return String(code);
 }
 

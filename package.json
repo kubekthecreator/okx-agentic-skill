@@ -8,7 +8,8 @@
     "start": "node bot.js",
     "dev": "cross-env DRY_RUN=true node bot.js",
     "test": "node --test",
-    "status": "node scripts/status.js"
+    "status": "node scripts/status.js",
+    "lint": "biome lint ."
   },
   "keywords": [
     "okx",
@@ -26,6 +27,7 @@
     "node": ">=20.0.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.4",
     "cross-env": "^10.1.0"
   }
 }
