@@ -122,6 +122,18 @@ test('a non-transient CLI failure is called once and not retried', async (t) => 
   assert.equal(fake.calls().length, 1);
 });
 
+test('a non-zero exit with an envelope lacking msg, message and code keeps execFile\'s message', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  fake.scenario({ 'wallet balance': [{ exit: 1, stdout: {} }] });
+  await assert.rejects(execution.fetchBalances(), { message: /^Command failed/ });
+});
+
+test('a non-zero exit with only a backend code surfaces cli_code_<code>', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  fake.scenario({ 'wallet balance': [{ exit: 1, stdout: { ok: false, code: 50011 } }] });
+  await assert.rejects(execution.fetchBalances(), { message: 'cli_code_50011' });
+});
+
 // ─── fetchBalances ─────────────────────────────────────────────────────────
 
 test('fetchBalances flattens tokenAssets across details into numeric rows', async () => {

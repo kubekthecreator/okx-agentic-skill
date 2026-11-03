@@ -77,8 +77,9 @@ async function cli(args, { timeout = 30_000, attempts = 2 } = {}) {
           }
           const msg = j.msg || j.message || `cli_code_${j.code}`;
           logger.warn('cli_error_response', { cmd: args.slice(0, 2).join(' '), code: j.code, msg, attempt });
-          // Keep execFile's error (the retry rules below read its code/killed/signal); only swap in the backend reason.
-          err.message = msg;
+          // Keep execFile's error (the retry rules below read its code/killed/signal); only swap in the
+          // backend reason. An envelope with no msg/message/code has none: keep execFile's argv + stderr.
+          if (j.msg || j.message || j.code != null) err.message = msg;
         } catch (parseErr) {
           if (parseErr instanceof CliConfirmingError) throw parseErr;
           // fall through to retry logic
@@ -147,6 +148,9 @@ export async function fetchCatalysts(tokenMint) {
     news_mentions_24h: 0,  // v0.1: stub
     // A failed source reads as 0 above: safe for entries (one catalyst fewer),
     // but not proof of a dead catalyst, so strategy.js must not exit on it.
+    // ponytail: only a rejected fetch counts; holder-data gaps (failed price-info,
+    // unreadable holders_history.json) still read as 0 growth. Flag them in
+    // fetchOnChainActivity if on_chain_spike-only positions need the same guard.
     incomplete: !smartMoney || !onChain,
   };
 }
