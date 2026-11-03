@@ -122,6 +122,18 @@ test('a non-transient CLI failure is called once and not retried', async (t) => 
   assert.equal(fake.calls().length, 1);
 });
 
+test('a non-zero exit with an envelope lacking msg, message and code keeps execFile\'s message', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  fake.scenario({ 'wallet balance': [{ exit: 1, stdout: {} }] });
+  await assert.rejects(execution.fetchBalances(), { message: /^Command failed/ });
+});
+
+test('a non-zero exit with only a backend code surfaces cli_code_<code>', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  fake.scenario({ 'wallet balance': [{ exit: 1, stdout: { ok: false, code: 50011 } }] });
+  await assert.rejects(execution.fetchBalances(), { message: 'cli_code_50011' });
+});
+
 // ─── fetchBalances ─────────────────────────────────────────────────────────
 
 test('fetchBalances flattens tokenAssets across details into numeric rows', async () => {
@@ -226,13 +238,13 @@ test('fetchCatalysts sums smart-money signals from the last 6h and drops older o
   const c = await execution.fetchCatalysts('jup');
   assert.equal(c.smart_money_buyers_6h, 5);
   assert.equal(c.smart_money_volume_6h_usd, 1200.5);
+  assert.equal(c.incomplete, false);
   assert.ok(!joined().some(a => a.startsWith('token price-info')));
 });
 
-// ─── known bugs (todo: expected to fail until production code is fixed) ────
+// ─── regressions (fixed bugs) ───────────────────────────────────────────────
 
 test('cli surfaces the backend msg when the CLI exits non-zero',
-  { todo: 'bug: cli() drops the backend msg on non-zero exit (execution.js:80 is caught by its own inner catch)' },
   async (t) => {
     t.mock.method(console, 'log', () => {});
     fake.scenario({ 'wallet balance': [{ exit: 1, stdout: { ok: false, msg: 'backend_reason' } }] });
@@ -240,7 +252,6 @@ test('cli surfaces the backend msg when the CLI exits non-zero',
   });
 
 test('a failed signal list call does not sell the position as catalyst_death',
-  { todo: 'bug: a failed signal list call sells the position as catalyst_death' },
   async (t) => {
     t.mock.method(console, 'log', () => {});
     const now = Date.now();
