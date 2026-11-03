@@ -621,6 +621,10 @@ tail -f logs/bot-*.log | jq .     # follow structured logs
 
 Or just watch your Telegram for alerts.
 
+### Development
+
+Before committing: `npm run lint && npm test`.
+
 ## Competition compliance
 
 This skill is built specifically for the **OKX Agentic Wallet Trading
