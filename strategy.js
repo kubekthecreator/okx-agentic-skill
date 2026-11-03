@@ -336,7 +336,9 @@ async function managePosition(pos, baseToken) {
   if (catKill) {
     const currentCatalysts = await execution.fetchCatalysts(pos.token.mint);
     const sig = signals.signalCatalyst(currentCatalysts);
-    if (!sig.passed) {
+    if (!sig.passed && currentCatalysts.incomplete) {
+      logger.warn('catalyst_death_unconfirmed', { position_id: pos.id, token: pos.token.symbol });
+    } else if (!sig.passed) {
       return closeAll(pos, baseToken, current_price, 'catalyst_death');
     }
   }

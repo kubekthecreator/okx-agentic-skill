@@ -226,6 +226,7 @@ test('fetchCatalysts sums smart-money signals from the last 6h and drops older o
   const c = await execution.fetchCatalysts('jup');
   assert.equal(c.smart_money_buyers_6h, 5);
   assert.equal(c.smart_money_volume_6h_usd, 1200.5);
+  assert.equal(c.incomplete, false);
   assert.ok(!joined().some(a => a.startsWith('token price-info')));
 });
 
@@ -239,7 +240,6 @@ test('cli surfaces the backend msg when the CLI exits non-zero',
   });
 
 test('a failed signal list call does not sell the position as catalyst_death',
-  { todo: 'bug: a failed signal list call sells the position as catalyst_death' },
   async (t) => {
     t.mock.method(console, 'log', () => {});
     const now = Date.now();

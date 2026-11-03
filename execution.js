@@ -145,6 +145,9 @@ export async function fetchCatalysts(tokenMint) {
     smart_money_volume_6h_usd: smartMoney?.volume_6h_usd ?? 0,
     holder_growth_24h_pct: onChain?.holder_growth_24h_pct ?? 0,
     news_mentions_24h: 0,  // v0.1: stub
+    // A failed source reads as 0 above: safe for entries (one catalyst fewer),
+    // but not proof of a dead catalyst, so strategy.js must not exit on it.
+    incomplete: !smartMoney || !onChain,
   };
 }
 
