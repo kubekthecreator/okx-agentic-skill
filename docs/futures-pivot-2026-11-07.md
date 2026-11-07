@@ -73,6 +73,20 @@ Leverage, holding time and drawdown for #2-#6 are unmeasured: the chart API retu
 | Winning a hackathon prize | No S2 announced; EEA eligibility for the Agent Trade Kit track unverified |
 | Measuring the trading idea on paper | **Yes, today, at $0** (public data, no account) |
 
+### 1.6 Could a zero-skill agent have won? (simulation, 2026-11-07)
+
+Method (M1, scratch script, two seeds and a closed-form check agree): agents with no skill on the real hourly OKX candles of the S1 window (2026-08-11 04:00 .. 08-25 04:00 UTC; ETH +32.9 %, BTC +25.5 %, SOL +33.6 %). Each agent picks BTC, ETH or SOL, flips a coin for long/short, holds 2-24 h, repeats; leverage uniform 30-60x; taker 0.05 % + 3 bp slippage per side; funding 0.01 %/8 h; isolated liquidation. 200,000 agents per variant; "best of 57" = 20,000 simulated contests.
+
+| Variant | One agent reaches +2,319 % | Agent ends positive | Agent wiped (≤ -99 %) | Best of 57 reaches +2,319 % |
+|---|---|---|---|---|
+| Coin flip, no stop, 30-60x | 0.11 % (1 in ~900) | 0.3 % | 99.7 % | 6 % |
+| Coin flip, stop at half the liquidation distance | 0.14-0.15 % | 3.5 % | 73 % | 8 % |
+| 70 % long bias, same stop | 0.56 % | 10.5 % | 50 % | **27 %** |
+| Coin flip, 5-15x (the EEA range) | 0.015 % | 20 % | 45 % | 0.8 % |
+| Same stop variant, five later 14-day windows (08-25 .. 11-03) | 0.001-0.03 % | 0.1-1.1 % | 81-94 % | 0-1.6 % |
+
+Reading (J): a long-biased high-leverage agent with no skill wins a 57-agent contest like S1 about one time in four in that rally, and almost never in the five fortnights after it. At 40x one round trip costs about 6.4 % of equity in fees and slippage alone (2 x 8 bp x 40), so the expected outcome of copying the method is losing most of the deposit. Fourteen days cannot separate skill from this; the agent is gone, so it never will be.
+
 ## 2. Idea card (owner format)
 
 ### H-F1: trend-following on BTC/ETH/SOL X-Perps, leverage ≤ 3x
