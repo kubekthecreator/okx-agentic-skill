@@ -1,6 +1,6 @@
 # Futures pivot: top-1 dossier, idea card, plan (2026-11-07)
 
-Status: **Plan approved by the owner 2026-11-07 ("yes to all"). Stage A ran the same day: KILL (section 7).** Stage B and the bot refactor are not started. No live bot code changed, nothing deployed, `DRY_RUN` untouched, VPS container `okx-bot` left stopped.
+Status: **Plan approved by the owner 2026-11-07 ("yes to all"). Stage A ran the same day: KILL (section 7). The follow-up carry test H-F2 (owner approved 2026-11-07): KILL (section 9).** Stage B and the bot refactor are not started. No live bot code changed, nothing deployed, `DRY_RUN` untouched, VPS container `okx-bot` left stopped.
 
 Labels: **M2** = measured two independent ways; **M1** = measured once; **V** = vendor/leaderboard's word; **J** = judgment or derived; **unverified** = no primary source. Research, not investment, legal or tax advice.
 
@@ -12,6 +12,7 @@ Labels: **M2** = measured two independent ways; **M1** = measured once; **V** = 
 - **The population does not show a trading edge either.** 57 valid entrants: median +3.38 % while an unlevered BTC long made +22.8 %. Summed trading PnL is +$21,599 with #1, **-$3,309 without #1**, and +$2,587 (+8.6 %) without both #1 and the single big loser #57 (-$5,897): outside #1 the sign hangs on one account. Against that, OKX paid $40,000 in prizes, and for 38 of the 40 prize winners the prize was larger than their trading profit. Most of the money S1 participants took home came from the prize pool (and signal subscriptions), not from the market.
 - **Plan:** refute cheaply first. A historical replay on public OKX data (cost $0, no account) decides whether there is anything to paper-trade. Only if it passes do we refactor the bot into a perp **paper** bot (no live-order code in the repo at all) and run it forward for at least 90 days. Real money needs a separate, dated owner decision.
 - **Gate A result (same day): KILL.** The frozen daily trend rule lost 7.9 % at 1x over 2021-03..2026-10 while T-bills made 21.55 % and holding BTC 71.8 %; funding paid by the long side cost 31 % of capital; 3x lost 92 %, 10x and 40x went to zero. Details in section 7.
+- **H-F2 carry result: KILL.** Shorting the 10 highest-funding and buying the 10 lowest-funding of the top-50 perps collected $15,950 of funding on $3,000, so the payer exists. Price moves of the legs and costs took most of it: +117 % over 5.7 years, but t = 1.30, -22 % without the 10 best days, a 55 % drawdown, a losing second half, -18 % with doubled slippage, and -5 % on the coins tradable from Poland. Two implementations agree. Details in section 9.
 
 ## 1. Top-1 agent dossier
 
@@ -234,3 +235,35 @@ Rule and costs exactly as frozen in `docs/prereg/H-F1.json` (commit `8021cb9`, b
 - Population and drawdown scripts: computed in this session from the leaderboard and chart rows quoted above; principal checked across both chart columns (same payload), drawdown recomputed by hand from the peak-to-trough ratio, PnL sum re-summed by a second parser. The script's "prize > PnL for 49 of 57" counts all entrants (including 11 losers with no prize); among the 40 prize winners it is 38.
 - Literature: Liu & Tsyvinski (2021), "Risks and Returns of Cryptocurrency", Review of Financial Studies; cited from memory, not re-read this session.
 - Independent review: one fresh reviewer (different agent) re-ran the scripts and the ETH/BTC candle pull; its Important findings were applied in the second commit.
+
+## 9. H-F2 readout (2026-11-08): KILL
+
+Rule, data and costs exactly as frozen in `docs/prereg/H-F2.json` (commit `4f0c045`, before any carry code or returns). Binance USDT-M perps as the history proxy: 658 perps incl. delisted `SETTLING`, 484 ever in the top-50 universe. Five symbols have funding gaps longer than 8 h (BNT 2021-04..2023-08, RIF 2023-05..10, PUMP 2025-06..07, OG 2023-04..2025-05, AIA 2025-12..2026-01); they stay in the panel and the 48-hour funding rule makes them ineligible during the gap. Every one of these gaps lasts weeks or longer; no symbol has a gap between 8 and 48 hours, the case where a held name would silently get zero funding and a diluted signal. Sample 2021-03-01..2026-10-31, 2,071 days, $3,000.
+
+| Criterion (primary, 1x gross) | Result | Threshold | Verdict |
+|---|---|---|---|
+| K-C1 growth | +116.8 % | T-bill +21.55 % | ok |
+| K-C2 t-stat of daily returns | **1.30** | ≥ 2.0 | KILL |
+| K-C3 without the 10 best days | **-21.8 %** | > 0 | KILL |
+| K-C4 max drawdown | **55.4 %** | ≤ 20 % | KILL |
+| K-C5 halves | +129.1 % / **-5.4 %** | both > 0 | KILL |
+| K-C6 slippage doubled | **-18.3 %** | > T-bill | KILL |
+| Report only: BTC buy-and-hold 1x | +71.4 % net | | |
+
+| Run | Growth | Max DD | t-stat |
+|---|---|---|---|
+| Primary 1x | +116.8 % | 55.4 % | 1.30 |
+| Cost stress | -18.3 % | 71.6 % | 0.23 |
+| 2x gross | +101.0 % | 83.0 % | 1.29 |
+| 3x gross | -25.2 % | 96.7 % | 1.26 |
+| X-Perp subset (coins tradable from PL today) | **-5.4 %** | 65.1 % | 0.21 |
+
+**Where the money went (primary; growth, t and DD M2, the split M1):** funding received +$15,950; long-basket price -$8,684; short-basket price +$3,872; fees -$2,582; slippage -$5,052. Per year: 2021 +75 %, 2022 +8 %, 2023 +22 %, 2024 -30 %, 2025 -4 %, 2026 +41 %. Turnover about 48 % of equity a day; worst single-name day -15 % of equity, worst portfolio day -20 %. No delisting closes occurred; no symbol's history ended early.
+
+**Reading (J):** the payer is real and large: leveraged longs on crowded coins pay the shorts. The legs are not neutral in practice: the low-funding coins we bought fell, and daily rebalancing costs ate about half of the funding (48 %). What is left is noise (t = 1.30), carried by ten days and by the first half of the sample, and it turns negative with doubled slippage, the realistic case on thinner X-Perp books. On the coins actually tradable from Poland it loses 5.4 %.
+
+**Proxy calibration:** over 2026-08-06..11-01, X-Perp funding correlates with Binance funding at only 0.26 per coin on average (BTC 0.03, ETH 0.06), and the daily baskets overlap 40 % (short) and 47 % (long). Binance history is a weak stand-in for X-Perps, so even a pass would not have transferred cleanly.
+
+**Checks:** a second implementation written separately from the prereg text, run on the same cache, gave +114.5 % / t 1.29 / DD 55.4 % / half 2 -5.4 % (primary) and -19.2 % / t 0.21 / DD 71.6 % (stress). The small gaps come from tie-breaking and the last-day convention. The first run had dropped the five gap symbols from the whole history (code review finding; PUMP alone was in the top 50 on about 416 days); keeping them lowered the primary from +143 % to +117 % and did not change the verdict. Known remaining biases, small against these margins: a coin must have a candle on the rebalance day to be selected, and symbols removed from Binance's exchangeInfo entirely are missing.
+
+**What follows:** both pre-registered perp ideas are killed; the project stays parked. The replay tools remain (`scripts/replay.js`, `scripts/replay-carry.js`, cache in gitignored `data/replay/`).
