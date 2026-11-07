@@ -37,7 +37,7 @@ Labels: **M2** = measured two independent ways; **M1** = measured once; **V** = 
 | Principal | $1,074, the same from every one of 56 chart samples (`returnAmountUsd / returnRate`), so no deposits or withdrawals moved the base (both columns come from one payload: a consistency check, not an independent source) | M1 |
 | Max drawdown | **82.6 %** on 6-hour samples: equity 6.11x at 08-17 16:00 UTC → 1.07x at 08-19 10:00 UTC. Intra-window drawdown can only be worse. | M1 |
 | Concentration | Best three 6-hour windows = 61 % of final PnL; without the best five windows: +$3,974 | M1 |
-| Track record | 14 days (one contest, one regime: ETH +30.4 %, BTC +22.8 % from 08-11 open to 08-25 close; breakout started 08-19) | M1 (OKX public daily candles; the reviewer re-pulled the 6-hour bars) |
+| Track record | 14 days (one contest, one regime: ETH +30.4 %, BTC +22.8 % from 08-11 open to 08-25 close; breakout started 08-19) | M1 (OKX public daily candles) |
 | Revenue besides trading | $10,000 prize; subscription $20/month, "Total sold" 157 (lifetime count, revenue unverified); rating 4.0 | V |
 | Independent verification | **None possible.** CEX account bound by UID; no trade list, no address, agent page 404. The PnL is the leaderboard's word. | J |
 
@@ -81,7 +81,7 @@ Leverage, holding time and drawdown for #2-#6 are unmeasured: the chart API retu
 | What the top-1 adds | Nothing we can measure: one 14-day draw at 33-63x. We test the mechanism, not the agent. |
 | Measured latency | Not latency-sensitive: signals on closed 1D (primary) / 4H (secondary) candles; a 60 s tick is irrelevant at this horizon (J). Public OKX REST from the dev box: 0.07-0.25 s (EEA candles), 0.31-0.35 s (global history candles, 100 rows), 3 calls each (M1). |
 | Prior | **10-15 % (J)** that a simple textbook daily trend rule beats cash after costs on three coins. Basis: anchored on our own base rate (none of the ~10 reachable mechanisms tested Aug-Oct survived costs; carry was only a rate, beating T-bills in 40-45 % of rolling windows), raised somewhat because daily trend, unlike those, has literature support; lowered again because the premium is well known and crowded. A judgment, not a computed number. |
-| Cheapest refutation | **Historical replay on public data, $0, ~1-2 working sessions.** No parameter search: the rule uses textbook defaults written into a pre-registration file before the first replay run, and the whole 2021-01-01..2026-10-31 sample is the test. **This is not a clean out-of-sample test**: the author has seen the 2025-26 regime and read the August 2026 candles for this dossier. The only clean out-of-sample data is the Stage B forward run. Price: global `BTC/ETH/SOL-USDT-SWAP` history candles (OKX history reaches January 2021 for all three, checked). Funding: real series; OKX's funding-history API returns only recent months (older queries come back empty, checked), so older funding comes from Binance's public funding history (as in the October research) and the source per period is logged. Fees: X-Perp taker 0.05 % per side (vendor figure from the October notes, re-check on the fee page before Stage A), plus 3 bp slippage per side. **Proxy limits, stated in the readout:** USDT-margined global swaps are not the USD-margined dated X-Perps (basis, funding and liquidity can differ; X-Perp books are thinner), and the EEA retail leverage cap is unknown. |
+| Cheapest refutation | **Historical replay on public data, $0, ~1-2 working sessions.** No parameter search: the rule uses textbook defaults written into a pre-registration file before the first replay run, and the whole 2021-01-01..2026-10-31 sample is the test. **This is not a clean out-of-sample test**: the author has seen the 2025-26 regime and read the August 2026 candles for this dossier. The only clean out-of-sample data is the Stage B forward run. Price: global `BTC/ETH/SOL-USDT-SWAP` history candles (OKX history reaches late January 2021 for SOL, earlier for BTC/ETH, checked; the sample starts when all three exist). Funding: real series; OKX's funding-history API returns only recent months (older queries come back empty, checked), so older funding comes from Binance's public funding history (as in the October research) and the source per period is logged. Fees: X-Perp taker 0.05 % per side (vendor figure from the October notes, re-check on the fee page before Stage A), plus 3 bp slippage per side. **Proxy limits, stated in the readout:** USDT-margined global swaps are not the USD-margined dated X-Perps (basis, funding and liquidity can differ; X-Perp books are thinner), and the EEA retail leverage cap is unknown. |
 | Cost limit | Money: $0 for replay and paper. No paid data, no x402, no new paid infra (VPS already paid). Time: replay ≤ 2 sessions; bot refactor ≤ 3 sessions and only if the replay passes. |
 
 ### Rejected card: copy the top-1 at 30x+
@@ -93,7 +93,7 @@ Payer unclear (the contest pool, not the market); track record 14 days; drawdown
 | Venue | Product | PL retail | Max leverage | Entity | Confidence |
 |---|---|---|---|---|---|
 | OKX global | USDT perpetual swaps | **Not offered in practice (legal block unverified).** okx.com shows PL visitors a banner: "Wygląda na to, że jesteś w Polska. Przejdź do witryny Europa"; the EEA help page says EEA residents are served by OKX Europe | n/a | n/a | M1 (banner observed 2026-11-07), official help page |
-| **OKX Europe** | **X-Perps** (`BTC-USD_UM_XPERP-310404` etc., expiry 2031-04-04, funding 0.01 %/8 h, `lever` 50 on BTC/ETH/SOL and 20 on others; 287 FUTURES listed on the EEA API, 259 of them expiring in > 3 years) | "All 30 EEA countries", PL not named; KYC + MiFID appropriateness test | "up to 10x" marketed | OKX Europe Markets Ltd, Malta, MiFID II | Official for mechanism; PL by name unverified |
+| **OKX Europe** | **X-Perps** (`BTC-USD_UM_XPERP-310404` etc., expiry 2031-04-04, funding 0.01 %/8 h, `lever` 50 on BTC/ETH/SOL (checked), 20 on others (October notes, not re-checked); 287 FUTURES listed on the EEA API, 259 of them expiring in > 3 years) | "All 30 EEA countries", PL not named; KYC + MiFID appropriateness test | "up to 10x" marketed | OKX Europe Markets Ltd, Malta, MiFID II | Official for mechanism; PL by name unverified |
 | Kraken EEA | Perps + dated futures | EEA residents, PL not named | up to 10x (press) | Payward Europe Digital Solutions (CY), CySEC 342/17 | Official entity; PL unverified |
 | Binance | Futures | Restricted in PL since 2026-07-01 (no MiCA licence); owner's experience matches | n/a | n/a | Press |
 | Hyperliquid | On-chain perps | Not geoblocked per third-party guides; **unlicensed** | venue max | none | Unverified vs primary terms |
@@ -138,11 +138,11 @@ Rules context: ESMA (2026-02-24) says crypto "perpetual" derivatives are likely 
 
 | ID | Kill if | Why |
 |---|---|---|
-| K-A1 | Net return at 1x over the full sample ≤ T-bill (~4.1 %/year pro-rated) | A rate is not an edge |
+| K-A1 | Net return at 1x over the full sample ≤ the 3-month T-bill over the same dates (FRED `DTB3`, compounded; near 0 % in 2021, ~4 % now) | A rate is not an edge |
 | K-A2 | Net with the 5 best trades removed ≤ 0 | Outlier dependence (same rule as onchain-scout) |
 | K-A3 | Max drawdown at 3x > 30 % | Leverage claim fails; owner can only see a 1x result |
-| K-A4 | Fewer than 60 trades on the primary 1D rule, pooled across BTC/ETH/SOL | No power; inconclusive counts as kill. The three coins are correlated, so the effective sample is smaller than the count |
-| K-A5 | Net ≤ 0 in either half (2021-01..2023-12 or 2024-01..2026-10) | One regime carrying the result is the top-1's failure mode |
+| K-A4 | Fewer than 60 trades on the primary 1D rule, pooled across BTC/ETH/SOL | No power; inconclusive counts as kill. The three coins are correlated, so the effective sample is smaller than the count. The pre-registered rule must expect ≥ 60 trades; a slower rule cannot be tested on this sample at all |
+| K-A5 | Net at 1x ≤ 0 in either half (2021-01..2023-12 or 2024-01..2026-10) | One regime carrying the result is the top-1's failure mode |
 | — | Reported, not a kill: buy-and-hold BTC 1x over the same window | So the owner sees what doing nothing earned |
 
 Primary rule = 1D; 4H is a secondary pre-registered variant and cannot rescue a failed primary.
@@ -151,7 +151,7 @@ Primary rule = 1D; 4H is a secondary pre-registered variant and cannot rescue a 
 
 | ID | Kill if |
 |---|---|
-| K-B1 | At each simulated entry and exit the bot also records the real public order book (`/api/v5/market/books`); if the mean real cost of filling our size exceeds the assumed 3 bp per side, the replay is re-run with the measured cost, and a re-run that fails K-A1 kills the idea |
+| K-B1 | At each simulated entry and exit the bot also records the real public X-Perp order book (`https://eea.okx.com/api/v5/market/books?instId=<X-Perp>&sz=400`); if the mean real cost of filling our size exceeds the assumed 3 bp per side, the replay is re-run with the measured cost, and a re-run that fails K-A1 kills the idea |
 | K-B2 | Forward cumulative net per trade below the replay mean minus 2 standard errors (a tripwire for a gross break only: with ~10-20 trades it rarely fires and passing it is not evidence of an edge) |
 | K-B3 | Paper drawdown > 30 % at 3x (same threshold as K-A3) |
 | K-B4 | Any paper liquidation at 3x |
