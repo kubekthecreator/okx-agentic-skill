@@ -41,6 +41,7 @@ Labels: **M2** = measured two independent ways; **M1** = measured once; **V** = 
 | Track record | 14 days (one contest, one regime: ETH +30.4 %, BTC +22.8 % from 08-11 open to 08-25 close; breakout started 08-19) | M1 (OKX public daily candles) |
 | Revenue besides trading | $10,000 prize; subscription $20/month, "Total sold" 157 (lifetime count, revenue unverified); rating 4.0 | V |
 | Independent verification | **None possible.** CEX account bound by UID; no trade list, no address, agent page 404. The PnL is the leaderboard's word. | J |
+| Status after the contest | **No longer available** (owner, 2026-11-07). Not in the public Trading list either; no PnL published after 2026-08-25. The 14-day record is the only record there will be. | owner fact + M1 |
 
 ### 1.3 #2-#5 for contrast (all from the same leaderboard, V)
 
