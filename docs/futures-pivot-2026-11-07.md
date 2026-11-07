@@ -1,6 +1,6 @@
 # Futures pivot: top-1 dossier, idea card, plan (2026-11-07)
 
-Status: **PLAN ONLY, awaiting owner approval.** No bot code changed, nothing deployed, `DRY_RUN` untouched, VPS container `okx-bot` left stopped.
+Status: **Plan approved by the owner 2026-11-07 ("yes to all"). Stage A ran the same day: KILL (section 7).** Stage B and the bot refactor are not started. No live bot code changed, nothing deployed, `DRY_RUN` untouched, VPS container `okx-bot` left stopped.
 
 Labels: **M2** = measured two independent ways; **M1** = measured once; **V** = vendor/leaderboard's word; **J** = judgment or derived; **unverified** = no primary source. Research, not investment, legal or tax advice.
 
@@ -11,6 +11,7 @@ Labels: **M2** = measured two independent ways; **M1** = measured once; **V** = 
 - **It traded leveraged perps on majors through Agent Trade Kit** (OKX CEX USDT-margined swaps), made +2,319.52 % (+$24,907.62) on about $1,074 in 14 days, **with an 82.6 % drawdown on the way** (6-hour samples), during a market where ETH rose 30.4 % and BTC 22.8 %. One six-hour window gave +372 % while ETH rose 8.7 %: effective leverage on the order of 33-63x (J, an order of magnitude, not a bound). This is one draw in one rally regime, not a repeatable process we can verify.
 - **The population does not show a trading edge either.** 57 valid entrants: median +3.38 % while an unlevered BTC long made +22.8 %. Summed trading PnL is +$21,599 with #1, **-$3,309 without #1**, and +$2,587 (+8.6 %) without both #1 and the single big loser #57 (-$5,897): outside #1 the sign hangs on one account. Against that, OKX paid $40,000 in prizes, and for 38 of the 40 prize winners the prize was larger than their trading profit. Most of the money S1 participants took home came from the prize pool (and signal subscriptions), not from the market.
 - **Plan:** refute cheaply first. A historical replay on public OKX data (cost $0, no account) decides whether there is anything to paper-trade. Only if it passes do we refactor the bot into a perp **paper** bot (no live-order code in the repo at all) and run it forward for at least 90 days. Real money needs a separate, dated owner decision.
+- **Gate A result (same day): KILL.** The frozen daily trend rule lost 7.9 % at 1x over 2021-03..2026-10 while T-bills made 21.55 % and holding BTC 71.8 %; funding paid by the long side cost 31 % of capital; 3x lost 92 %, 10x and 40x went to zero. Details in section 7.
 
 ## 1. Top-1 agent dossier
 
@@ -175,7 +176,38 @@ At 1D, 90 days gives roughly 10-20 trades. Stage B is the only clean out-of-samp
 
 Alternatives rejected: OKX EEA simulated trading as the paper engine (needs an owner account and demo key first, and demo books do not show real slippage; kept as an optional cross-check in Stage B); Hyperliquid as the paper venue (the real-money path would be unlicensed); a new repo (loses tested modules and deploy history for no gain).
 
-## 7. Evidence log (all read-only, 2026-11-07)
+## 7. Gate A readout (2026-11-07): KILL
+
+Rule and costs exactly as frozen in `docs/prereg/H-F1.json` (commit `8021cb9`, before any replay code existed). Sample 2021-03-01..2026-10-31, $3,000 in three equal sleeves.
+
+| Criterion (primary 1D) | Result | Threshold | Verdict |
+|---|---|---|---|
+| K-A1 growth at 1x | **-7.9 %** | T-bill +21.55 % | KILL |
+| K-A2 without the 5 best trades, 1x | -98.7 % | > 0 | KILL |
+| K-A3 max drawdown at 3x | 98.8 % | ≤ 30 % | KILL |
+| K-A4 trades, 1x | 185 | ≥ 60 | ok |
+| K-A5 halves at 1x | +29.2 % / **-28.7 %** | both > 0 | KILL |
+| Report only: BTC buy-and-hold 1x | +71.8 % | | |
+
+| Run | Trades | Growth | Max DD | Liquidations |
+|---|---|---|---|---|
+| 1D 1x | 185 | -7.9 % | 59.8 % | 0 |
+| 1D 3x | 124 | -92.1 % | 98.8 % | 1 (SOL sleeve gone after 2 trades) |
+| 1D 10x | 5 | -100 % | 100 % | 3 |
+| 1D 40x (top-1-like counterfactual) | 3 | -100 % | 100 % | 3 |
+| 4H 1x (secondary, report only) | 1,083 | -30.0 % | 63.9 % | 0 |
+
+**Where the money went (1D, 1x; growth M2, the split below M1):**
+- Before fees and funding the rule made about +$874 (+29.1 %, slippage still inside), barely above cash and far below holding BTC.
+- Fees cost $183. **Funding cost $929**, 31 % of starting capital: a trend rule is mostly long in bull markets, and longs pay funding. The payer in this market was us; the receiver was the carry side, the "rate, not an edge" found in October.
+- Longs made +$2,637, shorts lost -$2,874. Without their 5 best trades the longs lose too (-$523): the long profit is three SOL runs (+257 % from 2021-08-01, +206 % from 2023-10-21, +85 % from 2021-03-29) and one ETH run (+59 %). A long-only version is a post-hoc cut and would still be a lottery on a few runs, so it does not rescue H-F1.
+- Leverage does what the dossier predicted: 3x turns -8 % into -92 %, and 10x or 40x liquidates every sleeve within a handful of trades. The top-1's leverage applied to this rule ends at zero.
+
+**Checks (M2):** a second implementation written separately from the prereg text (scratch verifier, own data pull) reproduced the run: 185 trades on both, growth -8.2 % vs -7.9 %, max DD 59.9 % vs 59.8 %, 3x -92.2 % vs -92.1 % with the same liquidation. The residual gap comes from the last month's funding (OKX vs Binance) and intrabar timestamps. The verifier's first T-bill figure (20.65 %) was its own bug: FRED leaves holidays empty and it parsed them as 0 %; fixed, it gives 21.55 %. One fresh code review found no defect that changes these numbers. It found missing data-gap checks and test gaps, now fixed (see commit), and the replay was re-run from a fresh download.
+
+**What follows from the plan:** Stage B (forward paper) and the bot refactor are not started; the bot stays paused. The replay engine (`market.js`, `paper.js`, `scripts/replay.js`) stays as a tool: any new idea needs its own pre-registration, a named payer, and must beat the same kill criteria. Funding direction is the lesson worth keeping: on these perps the side that pays funding needs an edge larger than the carry it hands over.
+
+## 8. Evidence log (all read-only, 2026-11-07)
 
 - `onchainos competition list --status 2`, `competition detail/rank --activity-id 113` (CLI 4.2.1).
 - okx.ai pages above; leaderboard and 6-hour chart from `priapi/v1/wallet/activity/hackathon/{rank,chart,activity}` as loaded by the page (direct calls need a signature).
