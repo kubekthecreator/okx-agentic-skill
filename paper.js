@@ -149,3 +149,26 @@ export function simulate({ candles, funding, rule, leverage, costs, startMs, end
   }
   return { trades, equity };
 }
+
+// Largest peak-to-trough decline of [{ value }]; equity0 is the first peak.
+export function maxDrawdown(curve, equity0) {
+  let peak = equity0;
+  let dd = 0;
+  for (const { value } of curve) {
+    peak = Math.max(peak, value);
+    dd = Math.max(dd, (peak - value) / peak);
+  }
+  return dd;
+}
+
+// DTB3 compounded daily, actual/360, last print carried over non-trading days. tbill: [{ date, ratePct }].
+export function tbillGrowth(tbill, startMs, endMs) {
+  const DAY = 86400000;
+  let g = 1;
+  let k = -1;
+  for (let t = startMs; t < endMs; t += DAY) {
+    while (k + 1 < tbill.length && tbill[k + 1].date <= new Date(t).toISOString().slice(0, 10)) k++;
+    g *= 1 + tbill[k].ratePct / 100 / 360;
+  }
+  return g - 1;
+}

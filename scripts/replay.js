@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { getCandles, getFunding, getTbill } from '../market.js';
-import { simulate } from '../paper.js';
+import { maxDrawdown, simulate, tbillGrowth } from '../paper.js';
 
 const root = new URL('..', import.meta.url);
 const prereg = JSON.parse(fs.readFileSync(new URL('docs/prereg/H-F1.json', root), 'utf-8'));
@@ -80,27 +80,6 @@ function run(bar, leverage, from = startMs, to = endMs, equity0 = total) {
 
 const finalValue = (r) => (r.portfolio.length ? r.portfolio[r.portfolio.length - 1].value : r.equity0);
 const growth = (r) => finalValue(r) / r.equity0 - 1;
-function maxDrawdown(r) {
-  let peak = r.equity0;
-  let dd = 0;
-  for (const { value } of r.portfolio) {
-    peak = Math.max(peak, value);
-    dd = Math.max(dd, (peak - value) / peak);
-  }
-  return dd;
-}
-
-// DTB3 compounded daily, actual/360, last print carried over non-trading days.
-function tbillGrowth() {
-  let g = 1;
-  let k = -1;
-  for (let t = startMs; t < endMs; t += DAY) {
-    while (k + 1 < tbill.length && tbill[k + 1].date <= iso(t)) k++;
-    g *= 1 + tbill[k].ratePct / 100 / 360;
-  }
-  return g - 1;
-}
-
 const valueBefore = (r, ms) => r.portfolio.filter((p) => p.ts < ms).at(-1)?.value ?? r.equity0;
 
 // K-A1..K-A5 for one bar size.
@@ -116,11 +95,11 @@ function criteria(bar) {
   // Alternative reading of K-A5: each half as its own run from fresh equity.
   const alt1 = growth(run(bar, 1, day(h1[0]), mid));
   const alt2 = growth(run(bar, 1, mid, day(h2[1]) + DAY));
-  const bill = tbillGrowth();
+  const bill = tbillGrowth(tbill, startMs, endMs);
   const k = {
     'K-A1': { portfolio: growth(r1), tbill: bill, kill: growth(r1) <= bill },
     'K-A2': { exTop5Product: exTop5, kill: exTop5 <= 0 },
-    'K-A3': { maxDD3x: maxDrawdown(r3), kill: maxDrawdown(r3) > 0.3 },
+    'K-A3': { maxDD3x: maxDrawdown(r3.portfolio, r3.equity0), kill: maxDrawdown(r3.portfolio, r3.equity0) > 0.3 },
     'K-A4': { trades: r1.trades.length, kill: r1.trades.length < 60 },
     'K-A5': { half1, half2, kill: half1 <= 0 || half2 <= 0, altSeparateRuns: { half1: alt1, half2: alt2, kill: alt1 <= 0 || alt2 <= 0 } },
   };
@@ -140,7 +119,7 @@ for (const b of bars) {
       }),
     );
     const liquidations = r.trades.filter((t) => t.reason === 'liquidation').length;
-    runs.push({ bar: b.label, leverage: L, growth: growth(r), maxDD: maxDrawdown(r), trades: r.trades.length, liquidations, perInst });
+    runs.push({ bar: b.label, leverage: L, growth: growth(r), maxDD: maxDrawdown(r.portfolio, r.equity0), trades: r.trades.length, liquidations, perInst });
     fs.writeFileSync(`${outDir}H-F1-${b.label}-${L}x-trades.jsonl`, r.trades.map((t) => JSON.stringify(t)).join('\n'));
   }
 }
