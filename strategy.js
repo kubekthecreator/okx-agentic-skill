@@ -21,6 +21,7 @@ const TIME_STOP_MS = 5 * 24 * 60 * 60 * 1000;  // 5 days
 const VOLUME_COLLAPSE_PCT = 70;
 const EXIT_PENDING_STALE_MS = 10 * 60 * 1000;  // 10 min: stuck exit_pending → clear
 const MIN_COMPLETED_CANDLES = 25;  // momentum needs 1h + 24h of closed bars
+const CATALYST_UNCONFIRMED_ALERT_MS = 60 * 60_000;  // tell the operator once the catalyst check has been blind this long
 
 // ─── Entry funnel + last marks (in memory, reset on restart) ───────────────
 //
@@ -338,13 +339,35 @@ async function managePosition(pos, baseToken) {
     const sig = signals.signalCatalyst(currentCatalysts);
     if (!sig.passed && currentCatalysts.incomplete) {
       logger.warn('catalyst_death_unconfirmed', { position_id: pos.id, token: pos.token.symbol });
-    } else if (!sig.passed) {
-      return closeAll(pos, baseToken, current_price, 'catalyst_death');
+      await trackUnconfirmedCatalyst(pos, pnl_pct);
+    } else {
+      if (pos.catalyst_unconfirmed_since) state.updatePosition(pos.id, { catalyst_unconfirmed_since: null });
+      if (!sig.passed) return closeAll(pos, baseToken, current_price, 'catalyst_death');
     }
   }
 
   // 6. Scale-outs (don't close, just partial)
   await checkScaleOuts(pos, baseToken, pnl_pct, current_price);
+}
+
+// Alert-only: an unconfirmed catalyst read never sells (see check 5). The
+// streak start is kept on the position so it survives a restart; a missing,
+// unparsable or future value restarts the streak instead of alerting on it.
+async function trackUnconfirmedCatalyst(pos, pnl_pct) {
+  const now = Date.now();
+  const since = Date.parse(pos.catalyst_unconfirmed_since);
+  if (!(since <= now)) {
+    state.updatePosition(pos.id, { catalyst_unconfirmed_since: new Date(now).toISOString() });
+    return;
+  }
+  if (now - since < CATALYST_UNCONFIRMED_ALERT_MS) return;
+  await notify.catalystUnconfirmed({
+    position_id: pos.id,
+    symbol: pos.token.symbol,
+    stuck_ms: now - since,
+    pnl_pct,
+    hard_stop_pct: risk.getHardStopPct(),
+  });
 }
 
 async function checkScaleOuts(pos, baseToken, pnl_pct, current_price) {

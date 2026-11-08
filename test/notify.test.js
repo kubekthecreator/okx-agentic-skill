@@ -635,6 +635,22 @@ test('exitBlocked and exitFailing are loud and throttled per position', async ()
   assert.match(calls[1].body.text, /EXIT JUP failing<\/b> at −10\.30% · DRY\nExit reason: hard stop\nError: <code>slippage_too_high:3\.1<\/code>/);
 });
 
+test('catalystUnconfirmed is loud, says how long and what still protects, and is throttled per position', async () => {
+  const args = { position_id: 'p1', symbol: 'JUP', stuck_ms: 65 * 60_000, pnl_pct: 3.456, hard_stop_pct: 10 };
+  await notify.catalystUnconfirmed(args);
+  await notify.catalystUnconfirmed({ ...args, stuck_ms: 70 * 60_000 });
+  await notify.catalystUnconfirmed({ ...args, position_id: 'p2', symbol: 'W&F' });
+  assert.equal(calls.length, 2, 'one per position within 6h');
+  assert.ok(calls.every(c => c.body.disable_notification === false), 'loud');
+  const { text } = calls[0].body;
+  assert.match(text, /⚠️ <b>JUP: catalyst check blind for 1h 5m<\/b> · now \+3\.46% · DRY/);
+  assert.match(text, /The bot will NOT sell on a failed read\./);
+  assert.match(text, /hard stop −10%, trailing stop, 5-day time stop/);
+  assert.match(text, /<code>onchainos signal list<\/code>/);
+  assert.match(text, /Repeats at most every 6h\./);
+  assert.match(calls[1].body.text, /<b>W&amp;F: catalyst check blind/, 'symbol is escaped');
+});
+
 // ─── Risk state ───────────────────────────────────────────────────────────
 
 test('halted is loud with the reason in words; slow, normal and profit target are silent', async () => {
@@ -652,7 +668,7 @@ test('halted is loud with the reason in words; slow, normal and profit target ar
 test('the default export exposes the whole catalog', () => {
   for (const name of ['send', 'tickResult', 'dailyReport', 'weeklyHeartbeat', 'started', 'stopped',
     'crashed', 'unhandled', 'cannotStart', 'buy', 'buyBlocked', 'untracked', 'scaleOut', 'exit',
-    'exitBlocked', 'exitFailing', 'halted', 'slow', 'normal', 'profitTarget']) {
+    'exitBlocked', 'exitFailing', 'catalystUnconfirmed', 'halted', 'slow', 'normal', 'profitTarget']) {
     assert.equal(typeof notify.default[name], 'function', name);
   }
 });
@@ -677,11 +693,12 @@ test('exit without close notes (caller passed none) still renders', async () => 
   assert.doesNotMatch(calls[0].body.text, /cooldown|paused/);
 });
 
-test('catalog throttle intervals: 6h for cannotStart and buyBlocked, 1h for the rest', async () => {
+test('catalog throttle intervals: 6h for cannotStart, buyBlocked and catalystUnconfirmed, 1h for the rest', async () => {
   const H = 3600_000;
   const cases = [
     ['cannot_start:cli_unrunnable', 6 * H, () => notify.cannotStart('cli_unrunnable', 'r', 'h')],
     ['buy_blocked:JUP', 6 * H, () => notify.buyBlocked({ symbol: 'JUP', message: 'm', next: 'n' })],
+    ['catalyst_unconfirmed:p9', 6 * H, () => notify.catalystUnconfirmed({ position_id: 'p9', symbol: 'JUP', stuck_ms: 3.6e6, pnl_pct: 1, hard_stop_pct: 10 })],
     ['crash:boom', H, () => notify.crashed('boom')],
     ['unhandled:boom', H, () => notify.unhandled('boom')],
     ['exit_blocked:p9', H, () => notify.exitBlocked({ position_id: 'p9', symbol: 'JUP', reason: 'hard_stop', message: 'm', next: 'n' })],

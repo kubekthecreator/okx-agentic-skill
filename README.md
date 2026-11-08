@@ -256,7 +256,9 @@ ring; everything else arrives silently. Loud (act now): the bot can't start
 (sent before each exit of a Docker restart loop, at most every 6h; a
 successful start re-arms it), crashed or hit an unhandled error, went blind
 (5 failed ticks in a row, at most one alert per 30 min — e.g. CLI session
-expired or Market API quota exhausted), an exit is blocked or failing, a
+expired or Market API quota exhausted), an exit is blocked or failing, the
+catalyst-death check has been unconfirmed for over an hour (a catalyst data
+source is unreadable, so the bot does not sell on it; at most every 6h), a
 position is untracked, HALTED, the bot stopped with open positions, or an
 alert failed to build (a short fallback message). With sound: BUY, EXIT,
 and a BUY that OKX held for manual confirmation. Silent: start, a stop with

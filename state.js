@@ -34,6 +34,7 @@
 //   scale_outs_done: [0.15, 0.30, 0.50] subset,
 //   current_amount_token: number,    // decreases on scale-outs
 //   setup_id: string                 // for anti-pattern detector
+//   catalyst_unconfirmed_since: ISO | null,  // set while the catalyst-death check is skipped on an incomplete read
 // }
 
 import fs from 'fs';
