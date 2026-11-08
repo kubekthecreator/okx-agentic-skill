@@ -1,0 +1,93 @@
+{
+  "id": "H-F2",
+  "title": "Cross-sectional, dollar-neutral funding carry across many perps, gross exposure 1x",
+  "status": "FROZEN - no carry returns had been computed when this was committed",
+  "frozen_at": "2026-11-07",
+  "approved_by_owner": "2026-11-07 (yes to all; data source Binance public API)",
+  "honesty_note": "The author has seen the 2021-26 market regime, the H-F1 replay, and October 2026 single-coin carry results (DOGE/XRP/PEPE beat T-bills in 40-45 % of rolling 98-day windows; BTC/ETH/SOL near or below T-bills). Cross-sectional carry returns have not been computed. Parameters are textbook defaults with no search.",
+  "mechanism": {
+    "payer": "Leveraged longs on crowded coins pay funding; H-F1 measured $929 paid by its long side on $3,000 over 2021-26.",
+    "position": "Short the perps with the highest trailing funding, long the perps with the lowest, equal dollars per side, so market direction mostly cancels.",
+    "main_risk": "High funding usually means the coin is rising: short squeezes on the short basket; thin X-Perp books on small coins."
+  },
+  "data": {
+    "venue_proxy": "Binance USDT-M perpetuals, public API (OKX X-Perp funding history reaches only 2026-08-06; OKX bulk history files would need a file download).",
+    "universe_source": "https://fapi.binance.com/fapi/v1/exchangeInfo, contractType PERPETUAL, quoteAsset USDT, status TRADING or SETTLING (SETTLING = delisted, kept to reduce survivorship bias). Symbols removed from exchangeInfo entirely are missing: residual survivorship bias, stated in the readout.",
+    "candles": "https://fapi.binance.com/fapi/v1/klines, interval 1d (UTC), quote volume used for the liquidity filter",
+    "funding": "https://fapi.binance.com/fapi/v1/fundingRate per symbol, actual settlement times and intervals (8h, 4h or 1h)",
+    "cash_benchmark": "FRED DTB3, compounded daily actual/360, holidays carried over (same as H-F1)",
+    "fetch_from": "2021-01-01",
+    "cache_dir": "data/replay/carry/"
+  },
+  "sample": {
+    "start": "2021-03-01",
+    "end": "2026-10-31",
+    "halves": [
+      [
+        "2021-03-01",
+        "2023-12-31"
+      ],
+      [
+        "2024-01-01",
+        "2026-10-31"
+      ]
+    ]
+  },
+  "rule": {
+    "rebalance": "Daily at 00:00 UTC, using only data with timestamps before 00:00 UTC of that day.",
+    "eligible": "Perps with at least 30 completed daily candles and a funding print in the last 48 hours.",
+    "universe": "Top 50 eligible perps by mean daily quote volume over the previous 30 days. BTCUSDT and ETHUSDT are eligible like any other.",
+    "signal": "Mean of the funding prints in the previous 72 hours (rate per 8 hours: prints at 4h or 1h intervals are summed per 8-hour block first).",
+    "short_basket": "The 10 universe members with the highest signal.",
+    "long_basket": "The 10 universe members with the lowest signal.",
+    "ties": "Broken by higher 30-day quote volume.",
+    "weights": "Each basket member gets equal notional: (gross_exposure x equity / 2) / 10 per name, reset at every rebalance.",
+    "execution": "All trades at the daily open (00:00 UTC) of the rebalance day.",
+    "delisting": "If a held symbol has no candle for a day, it is closed at its last available close with normal exit costs plus an extra 10 % adverse price move, and its slot stays empty until the next rebalance."
+  },
+  "sizing": {
+    "starting_equity_usd": 3000,
+    "gross_exposure_runs": [
+      1,
+      2,
+      3
+    ],
+    "primary_gross_exposure": 1,
+    "margin": "cross margin; account liquidated if equity <= 0.5 % of gross notional (checked on daily closes)"
+  },
+  "costs": {
+    "taker_fee_per_side": 0.0005,
+    "slippage_bps_per_side": {
+      "BTCUSDT": 3,
+      "ETHUSDT": 3,
+      "others": 10
+    },
+    "charged_on": "Every traded notional: entries, exits and the resize of continuing positions at each rebalance.",
+    "funding": "Every funding settlement strictly after the position's open time and at or before its close: payment = rate x notional at the day's open. Longs pay positive rates, shorts receive them; negative rates reverse.",
+    "cost_stress_run": "Same rule with slippage doubled (6 / 20 bp)."
+  },
+  "metrics": {
+    "daily_return": "Portfolio equity change from one daily open to the next, including price PnL, funding and costs.",
+    "equity_curve": "Marked at each daily open.",
+    "t_stat": "mean(daily_return) / sd(daily_return) * sqrt(number of days)",
+    "max_drawdown": "Largest peak-to-trough decline of the equity curve, starting equity is the first peak."
+  },
+  "kill_criteria": {
+    "K-C1": "Primary (1x gross): growth over the sample <= T-bill growth over the same dates. KILL.",
+    "K-C2": "Primary: t_stat of daily returns < 2.0. KILL (with ~2,070 days the test has power; a weaker result is noise).",
+    "K-C3": "Primary: growth with the 10 best days removed <= 0. KILL (outlier dependence).",
+    "K-C4": "Primary: max drawdown > 20 %. KILL.",
+    "K-C5": "Primary: growth <= 0 in either half (slices of one continuous run). KILL.",
+    "K-C6": "Cost stress run (1x gross, slippage doubled): growth <= T-bill growth. KILL (thin X-Perp books).",
+    "report_only": [
+      "Split of PnL into funding received/paid, price PnL of each basket, fees, slippage",
+      "Per-year growth, turnover per day, number of names held",
+      "Worst single-name one-day loss and worst portfolio day",
+      "Subset run restricted to the 148 coins listed on OKX Europe X-Perps today (survivorship-biased; tradable universe for a PL account)",
+      "Proxy calibration: for coins on both venues, X-Perp funding (eea.okx.com funding-rate-history, available from 2026-08-06) vs Binance funding over the same settlements: mean difference and correlation per coin, plus the 72h-signal basket overlap on each day of that window",
+      "2x and 3x gross runs",
+      "BTC buy-and-hold 1x over the sample"
+    ],
+    "verdict": "PASS only if K-C1..K-C6 all pass. Any failure = KILL; nothing is tuned and re-run."
+  }
+}

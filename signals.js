@@ -149,6 +149,41 @@ export function signalRelativeStrength(tokenCandles, refCandles, minPct = 5) {
   };
 }
 
+// ─── Donchian / Turtle helpers (H-F1 replay) ──────────────────────────────
+
+// Turtle N, aligned with candles; null until seeded. TR_0 = high - low (no
+// previous close). Seed at index period-1 = mean of the first `period` TRs,
+// then N_t = ((period - 1) * N_{t-1} + TR_t) / period.
+export function turtleN(candles, period) {
+  const out = new Array(candles.length).fill(null);
+  let seedSum = 0;
+  candles.forEach((c, i) => {
+    const pc = i > 0 ? candles[i - 1].close : null;
+    const tr = pc === null
+      ? c.high - c.low
+      : Math.max(c.high - c.low, Math.abs(c.high - pc), Math.abs(c.low - pc));
+    if (i < period) {
+      seedSum += tr;
+      if (i === period - 1) out[i] = seedSum / period;
+    } else {
+      out[i] = ((period - 1) * out[i - 1] + tr) / period;
+    }
+  });
+  return out;
+}
+
+// High/low of the `lookback` bars BEFORE index i (bar i excluded); null if too few.
+export function channel(candles, i, lookback) {
+  if (i < lookback) return null;
+  let high = -Infinity;
+  let low = Infinity;
+  for (let j = i - lookback; j < i; j++) {
+    high = Math.max(high, candles[j].high);
+    low = Math.min(low, candles[j].low);
+  }
+  return { high, low };
+}
+
 // ─── Composite ─────────────────────────────────────────────────────────────
 
 // Returns a setup_id encoding which catalyst type triggered. Used by

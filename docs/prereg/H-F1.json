@@ -1,0 +1,94 @@
+{
+  "id": "H-F1",
+  "title": "Daily Donchian trend-following on BTC/ETH/SOL perps, leverage <= 3x",
+  "frozen_at": "2026-11-07",
+  "approved_by_owner": "2026-11-07 (plan in docs/futures-pivot-2026-11-07.md, 'yes to all')",
+  "honesty_note": "Not a clean out-of-sample test: the author has seen the 2025-26 regime and read August 2026 candles while writing the dossier. Parameters are textbook defaults (Turtle System 1) with no search. The only clean out-of-sample data will be the Stage B forward run.",
+
+  "instruments": {
+    "price_proxy": ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"],
+    "modelled_venue": ["BTC-USD_UM_XPERP-310404", "ETH-USD_UM_XPERP-310404", "SOL-USD_UM_XPERP-310404"],
+    "proxy_limits": "USDT-margined global swaps stand in for USD-margined dated X-Perps (listed only since April 2026). Basis, funding and liquidity can differ; X-Perp books are thinner; EEA retail leverage cap is unverified (OKX markets 'up to 10x')."
+  },
+
+  "data": {
+    "candles": "https://www.okx.com/api/v5/market/history-candles, bar 1Dutc (primary) and 4H (secondary), paginated with 'after', ascending after fetch",
+    "funding": "OKX /api/v5/public/funding-rate-history for the instrument where it covers the timestamp (only ~1 month back); otherwise Binance https://fapi.binance.com/fapi/v1/fundingRate for BTCUSDT / ETHUSDT / SOLUSDT. Source is logged per funding event.",
+    "cash_benchmark": "FRED DTB3 (3-month T-bill, discount basis, percent), https://fred.stlouisfed.org/graph/fredgraph.csv?id=DTB3",
+    "fetch_from": "2021-01-01 (SOL history starts 2021-01-23)",
+    "cache_dir": "data/replay/"
+  },
+
+  "sample": {
+    "start": "2021-03-01",
+    "end": "2026-10-31",
+    "halves": [["2021-03-01", "2023-12-31"], ["2024-01-01", "2026-10-31"]],
+    "note": "Bars before 2021-03-01 are warm-up only; no position may be opened before the start date. Open positions at the end are closed at the last close of 2026-10-31 with the normal exit costs."
+  },
+
+  "rule": {
+    "name": "Donchian breakout, Turtle System 1 defaults, no pyramiding",
+    "primary_bar": "1D",
+    "secondary_bar": "4H",
+    "secondary_note": "Same rule and lookbacks counted in bars. Reported only; it cannot rescue a failed primary.",
+    "entry_lookback": 20,
+    "exit_lookback": 10,
+    "atr_period": 20,
+    "atr_method": "Turtle N: seed = simple mean of the first 20 true ranges, then N_t = (19 * N_{t-1} + TR_t) / 20",
+    "stop_atr_mult": 2,
+    "long_entry": "close_t > max(high over the 20 bars before t)",
+    "short_entry": "close_t < min(low over the 20 bars before t)",
+    "long_exit": "close_t < min(low over the 10 bars before t), or the stop",
+    "short_exit": "close_t > max(high over the 10 bars before t), or the stop",
+    "stop": "long: entry fill - 2 * N at the signal bar; short: entry fill + 2 * N. Checked on every later bar's low/high. If the bar opens beyond the stop, fill at the open; otherwise at the stop price. Slippage and fee apply.",
+    "execution": "Signals use the closed bar; entries and channel exits fill at the next bar's open. A same-bar exit signal plus opposite entry signal closes and reverses at the next open.",
+    "positions": "At most one position per instrument."
+  },
+
+  "sizing": {
+    "starting_equity_usd": 3000,
+    "sleeves": "Equal thirds per instrument, no rebalancing between sleeves.",
+    "notional": "leverage x sleeve equity at entry (sleeve equity = sleeve cash, positions are flat at entry)",
+    "margin_mode": "isolated; margin = notional / leverage = the whole sleeve equity",
+    "leverage_runs": [1, 3, 10],
+    "counterfactual_runs": [40],
+    "counterfactual_note": "40x is above what OKX Europe offers (up to 10x). Reported only to show what the top-1's leverage would have done to this rule."
+  },
+
+  "costs": {
+    "taker_fee_per_side": 0.0005,
+    "taker_fee_source": "https://www.okx.com/en-eu/x-perps FAQ, read 2026-11-07: '2 bps maker and 5 bps taker for standard accounts'",
+    "slippage_bps_per_side": 3,
+    "slippage_direction": "Buys fill higher, sells fill lower, entries and exits alike.",
+    "funding": "Every funding timestamp strictly after the entry fill time and at or before the exit fill time: payment = rate * qty * entry fill price. Longs pay a positive rate, shorts receive it; negative rates reverse.",
+    "maintenance_margin_rate": 0.005
+  },
+
+  "liquidation": {
+    "long_liq_price": "entry * (1 - 1/L + mmr)",
+    "short_liq_price": "entry * (1 + 1/L - mmr)",
+    "check": "Every bar after entry: long if low <= liq, short if high >= liq. If the stop and the liquidation are both reachable in the same bar, book whichever result is worse for us.",
+    "loss": "A liquidated position loses its whole margin (the sleeve goes to zero at these settings) plus the entry fee already paid. A sleeve at zero stops trading."
+  },
+
+  "metrics": {
+    "equity_curve": "Portfolio equity = sum of sleeves, marked at every bar close (cash + unrealized PnL - accrued funding).",
+    "trade_return": "net PnL of the trade (after fees, slippage, funding) / sleeve equity at entry",
+    "max_drawdown": "largest peak-to-trough decline of the portfolio equity curve"
+  },
+
+  "kill_criteria": {
+    "K-A1": "Primary 1D, 1x: portfolio growth over the sample <= T-bill growth over the same dates (DTB3 compounded daily, actual/360, last available rate carried over non-trading days). KILL.",
+    "K-A2": "Primary 1D, 1x: product of (1 + trade_return) over all trades except the 5 largest trade_returns, minus 1, <= 0. KILL.",
+    "K-A3": "Primary 1D, 3x: max drawdown > 30 %. KILL (the leverage claim; owner may still see the 1x result).",
+    "K-A4": "Primary 1D, 1x: fewer than 60 closed trades pooled across the three instruments. KILL (no power).",
+    "K-A5": "Primary 1D, 1x: portfolio growth <= 0 in either half. KILL (regime dependence).",
+    "report_only": [
+      "BTC buy-and-hold 1x over the sample (first open to last close)",
+      "Per instrument: trades, win rate, net return, fees, funding",
+      "Liquidations per leverage run, including the 40x counterfactual",
+      "Secondary 4H results for the same criteria"
+    ],
+    "verdict": "PASS only if K-A1..K-A5 all pass on the primary 1D rule. Any failure = KILL; nothing is tuned and re-run."
+  }
+}

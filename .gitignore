@@ -35,3 +35,6 @@ Thumbs.db
 
 # OMC plugin session state (local tooling, never ship)
 .omc/
+
+# Replay cache and outputs (scripts/replay.js)
+data/
